@@ -74,8 +74,8 @@ if __name__ == "__main__":
     )
 
     for interval in consumption:
-        print(interval[interval_end])
-        print(interval[consumption])
+        print(interval["interval_end"])
+        print(interval["consumption"])
 
     # Send the total consumption to Tado
     # send_reading_to_tado(args.tado_email, args.tado_password, consumption)
