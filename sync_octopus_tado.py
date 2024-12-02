@@ -4,8 +4,10 @@ from requests.auth import HTTPBasicAuth
 from PyTado.interface import Tado
 from pprint import pprint
 
+def print_use(mix)
+    pprint(dir(mix))
 
-def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
+def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado_email, tado_pass):
     """
     Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
     """
@@ -19,7 +21,7 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
 
         if response.status_code == 200:
             meter_readings = response.json()
-            total_consumption = map(list, meter_readings["results"])
+            total_consumption = map(print_use, meter_readings["results"])
             url = meter_readings.get("next", "")
         else:
             print(
@@ -72,9 +74,9 @@ if __name__ == "__main__":
 
     # Get total consumption from Octopus Energy API
     consumption = get_meter_reading_total_consumption(
-        args.octopus_api_key, args.mprn, args.gas_serial_number
+        args.octopus_api_key, args.mprn, args.gas_serial_number, args.tado_email, args.tado_password
     )
 
-    die
+
     # Send the total consumption to Tado
-    send_reading_to_tado(args.tado_email, args.tado_password, consumption)
+    # send_reading_to_tado(args.tado_email, args.tado_password, consumption)
