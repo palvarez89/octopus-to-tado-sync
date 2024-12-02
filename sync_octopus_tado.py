@@ -18,7 +18,7 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
 
         if response.status_code == 200:
             meter_readings = response.json()
-            total_consumption[] = interval in meter_readings["results"]
+            total_consumption = map(list, (interval in meter_readings["results"]))
             url = meter_readings.get("next", "")
         else:
             print(
