@@ -28,7 +28,7 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
             break
 
     print(f"Consumption is {total_consumption}")
-    pprint(vars(total_consumption))
+    pprint(dir(total_consumption))
     return total_consumption
 
 
