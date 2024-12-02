@@ -8,7 +8,7 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
     """
     Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
     """
-    url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=month"
+    url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=week"
     consumption = []
 
     while url:
@@ -35,7 +35,7 @@ def send_reading_to_tado(username, password, date, reading):
     Sends the total consumption reading to Tado using its Energy IQ feature.
     """
     tado = Tado(username, password)
-    result = tado.set_eiq_meter_readings(reading=int(reading))
+    result = tado.set_eiq_meter_readings(reading=int(reading), date=date)
     print(result)
 
 
@@ -76,6 +76,7 @@ if __name__ == "__main__":
     for interval in consumption:
         print(interval["interval_end"])
         print(interval["consumption"])
+        send_reading_to_tado(args.tado_email, args.tado_password, interval["interval_end"], interval["consumption"])
 
     # Send the total consumption to Tado
     # send_reading_to_tado(args.tado_email, args.tado_password, consumption)
