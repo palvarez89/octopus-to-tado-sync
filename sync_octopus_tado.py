@@ -4,7 +4,7 @@ from requests.auth import HTTPBasicAuth
 from PyTado.interface import Tado
 from pprint import pprint
 
-def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado_email, tado_pass):
+def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
     """
     Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
     """
