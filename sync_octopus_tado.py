@@ -8,8 +8,8 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado_e
     """
     Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
     """
-    url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=quarter"
-    total_consumption = []
+    url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=month"
+    consumption = []
 
     while url:
         response = requests.get(
@@ -18,7 +18,7 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado_e
 
         if response.status_code == 200:
             meter_readings = response.json()
-            total_consumption = meter_readings["results"]
+            consumption = meter_readings["results"]
             url = meter_readings.get("next", "")
         else:
             print(
@@ -26,12 +26,11 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado_e
             )
             break
 
-    print(f"Consumption is {total_consumption}")
-    pprint(dir(total_consumption))
+    print(f"Consumption is {consumption}")
     return total_consumption
 
 
-def send_reading_to_tado(username, password, reading):
+def send_reading_to_tado(username, password, date, reading):
     """
     Sends the total consumption reading to Tado using its Energy IQ feature.
     """
@@ -71,9 +70,12 @@ if __name__ == "__main__":
 
     # Get total consumption from Octopus Energy API
     consumption = get_meter_reading_total_consumption(
-        args.octopus_api_key, args.mprn, args.gas_serial_number, args.tado_email, args.tado_password
+        args.octopus_api_key, args.mprn, args.gas_serial_number
     )
 
+    for interval in consumption:
+        print(interval[interval_end])
+        print(interval[consumption])
 
     # Send the total consumption to Tado
     # send_reading_to_tado(args.tado_email, args.tado_password, consumption)
