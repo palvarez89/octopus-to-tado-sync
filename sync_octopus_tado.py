@@ -27,7 +27,7 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
             break
 
     print(f"Consumption is {consumption}")
-    return total_consumption
+    return consumption
 
 
 def send_reading_to_tado(username, password, date, reading):
