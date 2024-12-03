@@ -1,10 +1,4 @@
-name: Run Tado-Octopus Script
-
-on:
-  workflow_dispatch:
-  schedule:
-    # Runs every day at 12pm UTC
-    - cron: '0 12 * * *'
+name: Backfill Tado-Octopus Script
 
 jobs:
   run_script:
@@ -25,7 +19,7 @@ jobs:
 
     - name: Run Python script
       run: |
-        python sync_octopus_tado.py \
+        python backfill_by_week.py \
           --tado-email "${{ secrets.TADO_EMAIL }}" \
           --tado-password "${{ secrets.TADO_PASSWORD }}" \
           --mprn "${{ secrets.OCTOPUS_MPRN }}" \
