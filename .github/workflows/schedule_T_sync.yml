@@ -1,4 +1,4 @@
-name: Run Tado-Octopus Script
+name: Run Tado-Octopus Script T
 
 on:
   workflow_dispatch:
