@@ -29,6 +29,7 @@ jobs:
 
     - name: Run Python script
       run: |
+        playwright install
         python sync_octopus_tado.py \
           --tado-email "${{ secrets.TADO_EMAIL }}" \
           --tado-password "${{ secrets.TADO_PASSWORD }}" \
