@@ -34,11 +34,31 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
     return total_consumption
 
 
+def tado_login(username,password):
+    tado = Tado(token_file_path="/var/tado/refresh_token")
+
+    status = tado.device_activation_status()
+
+    if status == "PENDING":
+        url = tado.device_verification_url()
+
+        tado.device_activation()
+
+        status = tado.device_activation_status()
+
+    if status == "COMPLETED":
+        print("Login successful")
+    else:
+        print(f"Login status is {status}")
+
+    return tado
 def send_reading_to_tado(username, password, reading):
     """
     Sends the total consumption reading to Tado using its Energy IQ feature.
     """
-    tado = Tado(username, password)
+
+    tado = tado_login(username=username, password=password)
+
     result = tado.set_eiq_meter_readings(reading=int(reading))
     print(result)
 
