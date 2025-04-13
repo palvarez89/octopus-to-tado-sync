@@ -5,3 +5,4 @@ python-tado==0.19.2
 requests==2.32.3
 urllib3==2.3.0
 playwright==1.15.0
+pyee==12.1.1
