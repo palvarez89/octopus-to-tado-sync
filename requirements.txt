@@ -9,7 +9,7 @@ packaging==24.2
 pathspec==0.12.1
 platformdirs==4.3.7
 playwright==1.51.0
-pyee==12.1.1
+pyee==13.0.0
 python-tado==0.19.2
 requests==2.32.3
 typing_extensions==4.13.2
