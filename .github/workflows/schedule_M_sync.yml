@@ -1,4 +1,4 @@
-name: Run Tado-Octopus Script MUM
+name: Run Tado-Octopus Script
 
 on:
   workflow_dispatch:
@@ -23,9 +23,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-        - name: Initialise playwright
-        run: |
-          playwright install
+    - name: Initialise playwright
+      run: |
+        playwright install
 
     - name: Run Python script
       run: |
