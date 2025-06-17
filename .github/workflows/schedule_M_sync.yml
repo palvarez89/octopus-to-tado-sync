@@ -1,0 +1,33 @@
+name: Run Tado-Octopus Script MUM
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs every Wednesday at 12pm UTC
+    - cron: '0 12 * * 3'
+
+jobs:
+  run_script:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Python script
+      run: |
+        python sync_octopus_tado.py \
+          --tado-email "${{ secrets.MUM_TADO_EMAIL }}" \
+          --tado-password "${{ secrets.MUM_TADO_PASSWORD }}" \
+          --mprn "${{ secrets.MUM_OCTOPUS_MPRN }}" \
+          --gas-serial-number "${{ secrets.MUM_OCTOPUS_GAS_SERIAL }}" \
+          --octopus-api-key "${{ secrets.MUM_OCTOPUS_API_KEY }}"
