@@ -7,13 +7,13 @@ from playwright.async_api import async_playwright
 from PyTado.interface import Tado
 
 
-def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
+def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, initial_gas_meter):
     """
     Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
     """
     period_from = datetime(2000, 1, 1, 0, 0, 0)
     url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=quarter&period_from={period_from.isoformat()}Z"
-    total_consumption = 0.0
+    total_consumption = initial_gas_meter
 
     while url:
         response = requests.get(url, auth=HTTPBasicAuth(api_key, ""))
@@ -59,14 +59,14 @@ async def browser_login(url, username, password):
         await page.click('button.c-btn--primary:has-text("Sign in")')
 
         # Optionally take a screenshot
-        await page.screenshot(path="screenshot.png")
+        # await page.screenshot(path="screenshot.png")
 
         await page.wait_for_selector(
             ".text-center.message-screen.b-bubble-screen__spaced", timeout=10000
         )
 
         # Take a screenshot (optional)
-        await page.screenshot(path="after-message.png")
+        # await page.screenshot(path="after-message.png")
         await browser.close()
 
 
@@ -125,6 +125,12 @@ def parse_args():
         "--gas-serial-number", required=True, help="Gas meter serial number"
     )
     parser.add_argument("--octopus-api-key", required=True, help="Octopus API key")
+    parser.add_argument(
+        "--initial-gas-meter",
+        type=float,
+        default=0.0,
+        help="(Optional) Initial gas meter reading to offset total consumption. Useful when you get a new meter installed. (default: 0.0)"
+    )
 
     return parser.parse_args()
 
@@ -134,7 +140,7 @@ if __name__ == "__main__":
 
     # Get total consumption from Octopus Energy API
     consumption = get_meter_reading_total_consumption(
-        args.octopus_api_key, args.mprn, args.gas_serial_number
+        args.octopus_api_key, args.mprn, args.gas_serial_number, args.initial_gas_meter
     )
 
     # Send the total consumption to Tado
