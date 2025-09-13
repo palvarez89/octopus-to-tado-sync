@@ -1,4 +1,4 @@
-name: Octopus to Tado Sync
+name: Octopus to Tado Sync_2
 
 on:
   workflow_dispatch:    # Manual trigger
