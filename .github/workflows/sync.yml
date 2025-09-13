@@ -1,0 +1,44 @@
+name: Sync Octopus to Tado
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      historical:
+        description: "Enable historical sync (true/false)"
+        required: false
+        default: "false"
+      start_date:
+        description: "Start date for historical sync (YYYY-MM-DD)"
+        required: false
+      end_date:
+        description: "End date for historical sync (YYYY-MM-DD)"
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: "3.10"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run sync
+        run: |
+          if [[ "${{ github.event.inputs.historical }}" == "true" ]]; then
+            if [[ -z "${{ github.event.inputs.start_date }}" || -z "${{ github.event.inputs.end_date }}" ]]; then
+              echo "❌ Error: Historical sync requires both start_date and end_date."
+              exit 1
+            fi
+            echo "Running historical sync from ${{ github.event.inputs.start_date }} to ${{ github.event.inputs.end_date }}..."
+            python sync_octopus_tado.py \
+              --historical \
+              --start-date "${{ github.event.inputs.start_date }}" \
+              --end-date "${{ github.event.inputs.end_date }}"
+          else
+            echo "Running normal weekly sync..."
+            python sync_octopus_tado.py
