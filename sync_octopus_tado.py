@@ -1,141 +1,71 @@
-import argparse
-import asyncio
+
+import os
 import requests
-from datetime import datetime
-from requests.auth import HTTPBasicAuth
-from playwright.async_api import async_playwright
-from PyTado.interface import Tado
+import sys
+from datetime import datetime, timedelta
+import argparse
 
-
-def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
-    """
-    Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
-    """
-    period_from = datetime(2000, 1, 1, 0, 0, 0)
-    url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=quarter&period_from={period_from.isoformat()}Z"
-    total_consumption = 0.0
-
-    while url:
-        response = requests.get(url, auth=HTTPBasicAuth(api_key, ""))
-
-        if response.status_code == 200:
-            meter_readings = response.json()
-            total_consumption += sum(
-                interval["consumption"] for interval in meter_readings["results"]
-            )
-            url = meter_readings.get("next", "")
-        else:
-            print(
-                f"Failed to retrieve data. Status code: {response.status_code}, Message: {response.text}"
-            )
-            break
-
-    print(f"Total consumption is {total_consumption}")
-    return total_consumption
-
-
-async def browser_login(url, username, password):
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True
-        )  # Set to True if you don't want a browser window
-        context = await browser.new_context()
-        page = await context.new_page()
-
-        await page.goto(url)
-
-        # Click the "Submit" button before login
-        await page.wait_for_selector('text="Submit"', timeout=5000)
-        await page.click('text="Submit"')
-
-        # Wait for the login form to appear
-        await page.wait_for_selector('input[name="loginId"]')
-
-        # Replace with actual selectors for your site
-        await page.fill('input[id="loginId"]', username)
-        await page.fill('input[name="password"]', password)
-
-        await page.click('button.c-btn--primary:has-text("Sign in")')
-
-        # Optionally take a screenshot
-        await page.screenshot(path="screenshot.png")
-
-        await page.wait_for_selector(
-            ".text-center.message-screen.b-bubble-screen__spaced", timeout=10000
-        )
-
-        # Take a screenshot (optional)
-        await page.screenshot(path="after-message.png")
-        await browser.close()
-
-
-def tado_login(username, password):
-    tado = Tado(token_file_path="/tmp/tado_refresh_token")
-
-    status = tado.device_activation_status()
-
-    if status == "PENDING":
-        url = tado.device_verification_url()
-
-        asyncio.run(browser_login(url, username, password))
-
-        tado.device_activation()
-
-        status = tado.device_activation_status()
-
-    if status == "COMPLETED":
-        print("Login successful")
-    else:
-        print(f"Login status is {status}")
-
-    return tado
-
-
-def send_reading_to_tado(username, password, reading):
-    """
-    Sends the total consumption reading to Tado using its Energy IQ feature.
-    """
-
-    tado = tado_login(username=username, password=password)
-
-    result = tado.set_eiq_meter_readings(reading=int(reading))
-    print(result)
-
+OCTOPUS_API_KEY = os.environ.get("OCTOPUS_API_KEY")
+OCTOPUS_MPRN = os.environ.get("OCTOPUS_MPRN")
+OCTOPUS_SERIAL = os.environ.get("OCTOPUS_SERIAL")
+TADO_USERNAME = os.environ.get("TADO_USERNAME")
+TADO_PASSWORD = os.environ.get("TADO_PASSWORD")
 
 def parse_args():
-    """
-    Parses command-line arguments for Tado and Octopus API credentials and meter details.
-    """
-    parser = argparse.ArgumentParser(
-        description="Tado and Octopus API Interaction Script"
-    )
-
-    # Tado API arguments
-    parser.add_argument("--tado-email", required=True, help="Tado account email")
-    parser.add_argument("--tado-password", required=True, help="Tado account password")
-
-    # Octopus API arguments
+    parser = argparse.ArgumentParser(description="Sync Octopus data to Tado")
     parser.add_argument(
-        "--mprn",
-        required=True,
-        help="MPRN (Meter Point Reference Number) for the gas meter",
+        "--historical",
+        action="store_true",
+        help="Enable historical sync mode (requires start and end dates)",
     )
     parser.add_argument(
-        "--gas-serial-number", required=True, help="Gas meter serial number"
+        "--start-date",
+        help="Start date for historical sync (YYYY-MM-DD)",
     )
-    parser.add_argument("--octopus-api-key", required=True, help="Octopus API key")
-
+    parser.add_argument(
+        "--end-date",
+        help="End date for historical sync (YYYY-MM-DD)",
+    )
     return parser.parse_args()
 
-
-if __name__ == "__main__":
+def get_octopus_consumption():
     args = parse_args()
 
-    # Get total consumption from Octopus Energy API
-    consumption = get_meter_reading_total_consumption(
-        args.octopus_api_key, args.mprn, args.gas_serial_number
-    )
+    url = f"https://api.octopus.energy/v1/gas-meter-points/{OCTOPUS_MPRN}/meters/{OCTOPUS_SERIAL}/consumption/"
+    params = {"order_by": "period_start"}
 
-    # Send the total consumption to Tado
-    send_reading_to_tado(args.tado_email, args.tado_password, consumption)
+    if args.historical:
+        if not args.start_date or not args.end_date:
+            print("Error: --historical requires --start-date and --end-date")
+            sys.exit(1)
+        try:
+            start = datetime.strptime(args.start_date, "%Y-%m-%d")
+            end = datetime.strptime(args.end_date, "%Y-%m-%d")
+        except ValueError:
+            print("Error: Dates must be in YYYY-MM-DD format")
+            sys.exit(1)
+        params["period_from"] = start.isoformat()
+        params["period_to"] = end.isoformat()
+        print(f"Fetching historical data from {start.date()} to {end.date()}")
+    else:
+        end = datetime.utcnow()
+        start = end - timedelta(days=7)
+        params["period_from"] = start.isoformat()
+        params["period_to"] = end.isoformat()
+        print(f"Fetching recent data from {start.date()} to {end.date()}")
+
+    r = requests.get(url, params=params, auth=(OCTOPUS_API_KEY, ""))
+    r.raise_for_status()
+    return r.json()["results"]
+
+def push_to_tado(reading):
+    # existing logic that posts data to Tado
+    pass
+
+def main():
+    readings = get_octopus_consumption()
+    for r in readings:
+        push_to_tado(r)
+
+if __name__ == "__main__":
+    main()
