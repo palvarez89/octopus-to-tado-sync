@@ -1,9 +1,7 @@
-name: Sync Octopus to Tado
+name: Octopus to Tado Sync
 
 on:
-  schedule:
-    - cron: "0 7 * * 1"
-  workflow_dispatch:
+  workflow_dispatch:    # Manual trigger
     inputs:
       historical:
         description: "Enable historical sync (true/false)"
@@ -15,19 +13,25 @@ on:
       end_date:
         description: "End date for historical sync (YYYY-MM-DD)"
         required: false
+  schedule:             # Weekly scheduled run
+    - cron: "0 7 * * 1"
 
 jobs:
-  build:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Set up Python
-        uses: actions/setup-python@v2
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
           python-version: "3.10"
+
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run sync
+
+      - name: Run Sync
         run: |
           if [[ "${{ github.event.inputs.historical }}" == "true" ]]; then
             if [[ -z "${{ github.event.inputs.start_date }}" || -z "${{ github.event.inputs.end_date }}" ]]; then
