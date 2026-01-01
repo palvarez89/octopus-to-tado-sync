@@ -11,7 +11,7 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number):
     """
     Retrieves total gas consumption from the Octopus Energy API for the given gas meter point and serial number.
     """
-    period_from = datetime(2000, 1, 1, 0, 0, 0)
+    period_from = datetime(2025, 1, 1, 0, 0, 0)
     url = f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/{gas_serial_number}/consumption/?group_by=quarter&period_from={period_from.isoformat()}Z"
     total_consumption = 0.0
 
