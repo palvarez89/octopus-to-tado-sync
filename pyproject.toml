@@ -22,7 +22,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "playwright==1.57.0",
+    "playwright==1.58.0",
     "python-tado==0.19.2",
     "requests==2.32.5",
 ]
