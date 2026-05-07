@@ -117,7 +117,10 @@ def test_get_consumption_since_date_raises_on_error(mock_get):
     mock_response.text = '{"detail":"No GasMeterPoint matches the given query."}'
     mock_get.return_value = mock_response
 
-    with pytest.raises(RuntimeError, match="Failed to retrieve Octopus consumption delta"):
+    with pytest.raises(
+        RuntimeError,
+        match="Failed to retrieve Octopus consumption delta.*MPRN: 123456789, Gas serial number: GAS123",
+    ):
         get_consumption_since_date(
             "fake-api-key", "123456789", "GAS123", "2025-01-01T00:00:00Z"
         )
@@ -130,7 +133,10 @@ def test_get_meter_reading_total_consumption_fallback_raises_on_error(mock_get):
     mock_response.text = '{"detail":"No GasMeterPoint matches the given query."}'
     mock_get.return_value = mock_response
 
-    with pytest.raises(RuntimeError, match="Failed to retrieve Octopus consumption data"):
+    with pytest.raises(
+        RuntimeError,
+        match="Failed to retrieve Octopus consumption data.*MPRN: 123456789, Gas serial number: GAS123",
+    ):
         get_meter_reading_total_consumption("fake-api-key", "123456789", "GAS123")
 
 

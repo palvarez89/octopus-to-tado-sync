@@ -363,6 +363,7 @@ def get_consumption_since_date(api_key, mprn, gas_serial_number, since_datetime)
         else:
             raise RuntimeError(
                 "Failed to retrieve Octopus consumption delta. "
+                f"MPRN: {mprn}, Gas serial number: {gas_serial_number}, "
                 f"Status code: {response.status_code}, Message: {response.text}"
             )
 
@@ -425,6 +426,7 @@ def get_meter_reading_total_consumption(api_key, mprn, gas_serial_number, tado=N
         else:
             raise RuntimeError(
                 "Failed to retrieve Octopus consumption data. "
+                f"MPRN: {mprn}, Gas serial number: {gas_serial_number}, "
                 f"Status code: {response.status_code}, Message: {response.text}"
             )
 
