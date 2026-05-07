@@ -2,6 +2,8 @@ import sys
 from datetime import date
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from sync_octopus_tado import (
     call_tado_method,
     get_tado_last_tariff_checkpoint,
@@ -106,6 +108,30 @@ def test_get_consumption_since_date(mock_get):
         "fake-api-key", "123456789", "GAS123", "2025-01-01T00:00:00Z"
     )
     assert delta == 3.5
+
+
+@patch("sync_octopus_tado.requests.get")
+def test_get_consumption_since_date_raises_on_error(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.text = '{"detail":"No GasMeterPoint matches the given query."}'
+    mock_get.return_value = mock_response
+
+    with pytest.raises(RuntimeError, match="Failed to retrieve Octopus consumption delta"):
+        get_consumption_since_date(
+            "fake-api-key", "123456789", "GAS123", "2025-01-01T00:00:00Z"
+        )
+
+
+@patch("sync_octopus_tado.requests.get")
+def test_get_meter_reading_total_consumption_fallback_raises_on_error(mock_get):
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.text = '{"detail":"No GasMeterPoint matches the given query."}'
+    mock_get.return_value = mock_response
+
+    with pytest.raises(RuntimeError, match="Failed to retrieve Octopus consumption data"):
+        get_meter_reading_total_consumption("fake-api-key", "123456789", "GAS123")
 
 
 def test_call_tado_method_uses_first_available_name():
@@ -281,4 +307,3 @@ def test_parse_args_update_tariff_flag():
 
     assert args.update_tariff is True
     assert args.octopus_account_number == "A-12345"
-
