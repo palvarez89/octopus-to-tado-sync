@@ -479,6 +479,30 @@ def latest_actual_meter_anchor(
     return value, read_at
 
 
+def zero_actual_meter_baseline(
+    meter_results: Sequence[Sequence[Dict[str, Any]]],
+) -> Optional[Tuple[Decimal, str]]:
+    candidates: List[Tuple[str, Decimal]] = []
+    for readings in meter_results:
+        for reading in readings:
+            read_at = str(reading.get("readAt") or "")
+            if not read_at:
+                continue
+            for register in reading.get("registers") or []:
+                if register.get("isQuarantined") is True:
+                    continue
+                try:
+                    value = Decimal(str(register["value"]))
+                except (KeyError, InvalidOperation, TypeError, ValueError):
+                    continue
+                if value == 0:
+                    candidates.append((read_at, value))
+    if not candidates:
+        return None
+    read_at, value = min(candidates, key=lambda candidate: candidate[0])
+    return value, read_at
+
+
 def fetch_octopus_consumption_total(
     api_key: str,
     mprn: str,
@@ -589,18 +613,70 @@ def closest_accumulation_to_time(
     )
 
 
+def accumulation_delta_ratios(
+    interval_readings: Sequence[Dict[str, Any]],
+    accumulation_readings: Sequence[Dict[str, Any]],
+) -> List[Decimal]:
+    usage_by_end_date: Dict[str, Decimal] = {}
+    for reading in interval_readings:
+        interval_end = reading.get("intervalEnd")
+        if not interval_end:
+            continue
+        try:
+            end_date = datetime.fromisoformat(
+                str(interval_end).replace("Z", "+00:00")
+            ).date()
+            usage_by_end_date[end_date.isoformat()] = Decimal(str(reading["value"]))
+        except (KeyError, InvalidOperation, TypeError, ValueError):
+            continue
+
+    ordered = sorted(
+        accumulation_readings,
+        key=lambda reading: str(
+            reading.get("intervalEnd") or reading.get("intervalStart") or ""
+        ),
+    )
+    ratios: List[Decimal] = []
+    for previous, current in zip(ordered, ordered[1:]):
+        current_end = current.get("intervalEnd") or current.get("intervalStart")
+        if not current_end:
+            continue
+        try:
+            current_date = datetime.fromisoformat(
+                str(current_end).replace("Z", "+00:00")
+            ).date()
+            usage = usage_by_end_date[current_date.isoformat()]
+            delta = Decimal(str(current["value"])) - Decimal(str(previous["value"]))
+            if usage > 0 and delta > 0:
+                ratios.append(delta / usage)
+        except (KeyError, InvalidOperation, TypeError, ValueError):
+            continue
+    return ratios
+
+
+def decimal_median(values: Sequence[Decimal]) -> Optional[Decimal]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / Decimal("2")
+
+
 def build_cumulative_calibration_report(
     anchor: Optional[Tuple[Decimal, str]],
     historical_accumulation: Optional[Dict[str, Any]],
     current_accumulation: Optional[Dict[str, Any]],
     error: Optional[str] = None,
+    interval_readings: Sequence[Dict[str, Any]] = (),
+    accumulation_readings: Sequence[Dict[str, Any]] = (),
+    zero_baseline: Optional[Tuple[Decimal, str]] = None,
 ) -> str:
     lines = ["", "## Cumulative-series calibration", ""]
     if error:
         lines.append(f"API error: {error}")
-    elif not anchor or not historical_accumulation or not current_accumulation:
-        lines.append("Insufficient readings to calibrate the cumulative series.")
-    else:
+    elif anchor and historical_accumulation and current_accumulation:
         anchor_value, anchor_date = anchor
         try:
             historical_value = Decimal(str(historical_accumulation["value"]))
@@ -633,6 +709,58 @@ def build_cumulative_calibration_report(
                     "This calibration is read-only and was not submitted to Tado.",
                 ]
             )
+    elif current_accumulation:
+        ratios = accumulation_delta_ratios(interval_readings, accumulation_readings)
+        delta_factor = decimal_median(ratios)
+        stable = bool(
+            delta_factor
+            and len(ratios) >= 3
+            and all(abs(ratio - delta_factor) <= Decimal("0.01") for ratio in ratios)
+        )
+        baseline = zero_baseline if zero_baseline and zero_baseline[0] == 0 else None
+        if delta_factor is None or delta_factor == 0 or not stable or baseline is None:
+            lines.extend(
+                [
+                    "Insufficient evidence to calibrate the cumulative series.",
+                    "",
+                    f"Matched recent daily deltas: {len(ratios)} (at least 3 stable matches required).",
+                    f"Zero meter baseline available: {'Yes' if baseline else 'No'}.",
+                ]
+            )
+        else:
+            try:
+                current_value = Decimal(str(current_accumulation["value"]))
+                corrected_current = current_value / delta_factor
+            except (
+                KeyError,
+                InvalidOperation,
+                TypeError,
+                ValueError,
+                ZeroDivisionError,
+            ):
+                lines.append("Octopus returned an invalid calibration value.")
+            else:
+                current_date = (
+                    current_accumulation.get("intervalEnd")
+                    or current_accumulation.get("intervalStart")
+                    or "unknown"
+                )
+                lines.extend(
+                    [
+                        "| Value | Result |",
+                        "|---|---:|",
+                        "| Calibration method | Recent cumulative deltas / matching daily usage |",
+                        f"| Matched stable days | {len(ratios)} |",
+                        f"| Observed aggregate factor | {delta_factor} |",
+                        f"| Zero meter baseline | {baseline[0]} m3 on {baseline[1]} |",
+                        f"| Latest aggregate | {current_value} m3 on {current_date} |",
+                        f"| Factor-corrected current register | {corrected_current} m3 |",
+                        "",
+                        "This calibration is read-only and was not submitted to Tado.",
+                    ]
+                )
+    else:
+        lines.append("Insufficient readings to calibrate the cumulative series.")
     return "\n".join(lines) + "\n"
 
 
@@ -1024,6 +1152,9 @@ def run_probe(
         historical_accumulation,
         latest_reading(accumulation_readings),
         calibration_error,
+        extract_readings(supply_point, "m3"),
+        accumulation_readings,
+        zero_actual_meter_baseline(actual_meter_results),
     )
     return report
 

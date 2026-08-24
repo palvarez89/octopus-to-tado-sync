@@ -312,6 +312,59 @@ def test_cumulative_calibration_derives_corrected_register():
     assert "11995.610 m3" in report
 
 
+def test_cumulative_calibration_uses_stable_recent_deltas_and_zero_baseline():
+    intervals = []
+    accumulations = []
+    for day, usage, aggregate in (
+        (18, "0.074", "23980.526"),
+        (19, "1.140", "23982.806"),
+        (20, "1.209", "23985.224"),
+        (21, "1.030", "23987.284"),
+        (22, "0.958", "23989.200"),
+        (23, "1.010", "23991.220"),
+    ):
+        end = f"2026-08-{day:02d}T00:00:00+01:00"
+        intervals.append(reading(usage, "METERS_CUBED"))
+        intervals[-1]["intervalEnd"] = end
+        accumulations.append(reading(aggregate, "METERS_CUBED"))
+        accumulations[-1]["intervalEnd"] = end
+
+    report = probe.build_cumulative_calibration_report(
+        (Decimal("5039"), "2022-12-24T00:00:00+00:00"),
+        None,
+        accumulations[-1],
+        interval_readings=intervals,
+        accumulation_readings=accumulations,
+        zero_baseline=(Decimal("0"), "2020-07-29T23:00:00+00:00"),
+    )
+
+    assert "Matched stable days | 5" in report
+    assert "Observed aggregate factor | 2" in report
+    assert "11995.610 m3" in report
+
+
+def test_cumulative_calibration_requires_zero_baseline_for_absolute_value():
+    intervals = []
+    accumulations = []
+    for offset, value in enumerate(range(10, 18, 2)):
+        end = f"2026-08-{20 + offset:02d}T00:00:00+01:00"
+        intervals.append(reading("1", "METERS_CUBED"))
+        intervals[-1]["intervalEnd"] = end
+        accumulations.append(reading(str(value), "METERS_CUBED"))
+        accumulations[-1]["intervalEnd"] = end
+
+    report = probe.build_cumulative_calibration_report(
+        None,
+        None,
+        accumulations[-1],
+        interval_readings=intervals,
+        accumulation_readings=accumulations,
+    )
+
+    assert "Insufficient evidence" in report
+    assert "Zero meter baseline available: No" in report
+
+
 def test_closest_accumulation_selects_reading_nearest_anchor():
     earlier = reading("10070", "METERS_CUBED", "2022-12-23T00:00:00+00:00")
     earlier["intervalEnd"] = "2022-12-24T00:00:00+00:00"
