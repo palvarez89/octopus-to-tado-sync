@@ -22,7 +22,7 @@ mutation ObtainToken($apiKey: String!) {
 """
 READINGS_QUERY = """
 query GasReadings($mprn: String!, $start: DateTime!, $end: DateTime!) {
-  supplyPoint(externalIdentifier: $mprn, marketName: "GBR") {
+  supplyPoint(externalIdentifier: $mprn, marketName: "GBR_GAS") {
     kwh: readings(
       startAt: $start
       endAt: $end
