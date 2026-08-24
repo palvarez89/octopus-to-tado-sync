@@ -38,4 +38,5 @@ jobs:
             --api-key "${{ secrets.OCTOPUS_API_KEY }}" \
             --mprn "${{ secrets.OCTOPUS_MPRN }}" \
             --gas-serial-number "${{ secrets.OCTOPUS_GAS_SERIAL }}" \
+            --account-number "${{ secrets.OCTOPUS_ACCOUNT_NUMBER }}" \
             --days "${{ inputs.days }}"

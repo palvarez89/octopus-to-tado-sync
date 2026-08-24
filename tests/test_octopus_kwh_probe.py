@@ -166,3 +166,61 @@ def test_device_report_preserves_independent_query_failures():
     assert "API error: Accumulation failed" in report
     assert "API error: Interval failed" in report
     assert "SECRET-SERIAL" not in report
+
+
+def test_dedicated_meter_queries_request_actual_register_values():
+    assert "account(accountNumber: $accountNumber)" in probe.ACCOUNT_GAS_METER_QUERY
+    assert "meters { id serialNumber }" in probe.ACCOUNT_GAS_METER_QUERY
+    assert "gasMeterReadings(" in probe.ACTUAL_GAS_METER_READINGS_QUERY
+    assert "registers { identifier name value digits isQuarantined }" in (
+        probe.ACTUAL_GAS_METER_READINGS_QUERY
+    )
+
+
+def test_find_matching_gas_meter_ids_uses_mprn_and_serial():
+    account = {
+        "properties": [
+            {
+                "gasMeterPoints": [
+                    {
+                        "mprn": "123456789",
+                        "meters": [
+                            {"id": "SECRET-ID", "serialNumber": "SECRET-SERIAL"}
+                        ],
+                    }
+                ]
+            }
+        ]
+    }
+    assert probe.find_matching_gas_meter_ids(account, "123456789", "SECRET-SERIAL") == [
+        "SECRET-ID"
+    ]
+    assert (
+        probe.find_matching_gas_meter_ids(account, "different", "SECRET-SERIAL") == []
+    )
+
+
+def test_actual_meter_report_shows_values_without_identifiers():
+    report = probe.build_actual_meter_readings_report(
+        [
+            [
+                {
+                    "readAt": "2026-08-23T01:00:00+01:00",
+                    "readingType": "SMART",
+                    "registers": [
+                        {
+                            "identifier": "SECRET-REGISTER",
+                            "name": "SECRET-NAME",
+                            "value": "11995.610",
+                            "digits": 6,
+                            "isQuarantined": False,
+                        }
+                    ],
+                }
+            ]
+        ]
+    )
+    assert "11995.610" in report
+    assert "2026-08-23T01:00:00+01:00" in report
+    assert "SECRET-REGISTER" not in report
+    assert "SECRET-NAME" not in report
