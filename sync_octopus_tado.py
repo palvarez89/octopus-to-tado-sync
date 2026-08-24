@@ -530,6 +530,7 @@ def get_meter_reading_total_consumption(
     source_unit="source units",
     target_unit="target units",
     meter_source="consumption-delta",
+    allow_stale_preview=False,
 ):
     """
     Retrieves total gas consumption and calculates the delta since last Tado reading.
@@ -550,7 +551,7 @@ def get_meter_reading_total_consumption(
         readings = get_tado_meter_readings(tado)
         if readings:
             latest_tado_date = parse_api_date(readings[0]["date"])
-            if cutoff_date <= latest_tado_date:
+            if cutoff_date <= latest_tado_date and not allow_stale_preview:
                 print(
                     "No complete new Octopus period is available: "
                     f"cutoff {cutoff_date} is not after latest Tado reading "
@@ -593,12 +594,18 @@ def get_meter_reading_total_consumption(
                 raw_consumption_delta, reading_date, factor, matched_days = (
                     cumulative_update
                 )
-                if reading_date <= latest_tado_date:
+                stale_preview = reading_date <= latest_tado_date
+                if stale_preview and not allow_stale_preview:
                     print(
                         "The newest calibrated Octopus cumulative reading is not "
                         "newer than Tado. Skipping meter update."
                     )
                     return None
+                if stale_preview:
+                    print(
+                        "Dry-run historical preview: the proposed reading date is "
+                        "not newer than Tado and must not be submitted."
+                    )
                 consumption_delta = raw_consumption_delta * consumption_multiplier
                 total_consumption = checkpoint_value + consumption_delta
                 print(
@@ -608,7 +615,14 @@ def get_meter_reading_total_consumption(
                 append_github_step_summary(
                     "Meter sync calculation",
                     [
-                        ("Status", "Ready to submit from calibrated cumulative data"),
+                        (
+                            "Status",
+                            (
+                                "Dry-run historical preview - must not submit"
+                                if stale_preview
+                                else "Ready to submit from calibrated cumulative data"
+                            ),
+                        ),
                         (
                             "Tado checkpoint",
                             f"{checkpoint_value:.3f} {target_unit} on {checkpoint_date}",
@@ -969,6 +983,7 @@ def main():
         source_unit=args.octopus_consumption_unit,
         target_unit=args.tado_reading_unit,
         meter_source=args.meter_source,
+        allow_stale_preview=args.dry_run_meter,
     )
 
     if meter_update is not None:

@@ -120,6 +120,44 @@ def test_meter_sync_rejects_cumulative_reading_not_newer_than_tado(mock_cumulati
     assert update is None
 
 
+@patch("sync_octopus_tado.get_calibrated_cumulative_delta")
+def test_meter_sync_allows_stale_cumulative_preview_only_when_requested(
+    mock_cumulative,
+):
+    mock_cumulative.return_value = (
+        3.5,
+        date(2026, 8, 22),
+        Decimal("2"),
+        5,
+    )
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [
+            {"reading": 3859, "date": "2026-08-23"},
+            {"reading": 3858, "date": "2026-08-20"},
+        ]
+    }
+
+    update = get_meter_reading_total_consumption(
+        "fake-api-key",
+        "123456789",
+        "GAS123",
+        tado=mock_tado,
+        today=date(2026, 8, 24),
+        include_reading_date=True,
+        meter_source="calibrated-cumulative",
+        allow_stale_preview=True,
+    )
+
+    assert update == (3861.5, date(2026, 8, 22))
+    mock_cumulative.assert_called_once_with(
+        "fake-api-key",
+        "123456789",
+        date(2026, 8, 20),
+        date(2026, 8, 22),
+    )
+
+
 @patch("sync_octopus_tado.octopus_probe.graphql_request")
 @patch("sync_octopus_tado.octopus_probe.obtain_token", return_value="token")
 def test_calibrated_cumulative_delta_requires_stable_recent_factor(
