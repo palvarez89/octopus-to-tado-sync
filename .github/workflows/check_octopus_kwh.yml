@@ -1,4 +1,4 @@
-name: Check Octopus direct kWh API
+name: Check Octopus gas readings API
 
 on:
   workflow_dispatch:

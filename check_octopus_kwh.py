@@ -56,6 +56,26 @@ query GasReadings($mprn: String!, $start: DateTime!, $end: DateTime!) {
   }
 }
 """
+ACCUMULATION_QUERY = """
+query GasAccumulationReadings($mprn: String!, $start: DateTime!, $end: DateTime!) {
+  supplyPoint(externalIdentifier: $mprn, marketName: "GBR_GAS") {
+    accumulation: readings(
+      startAt: $start
+      endAt: $end
+      readingType: ACCUMULATION
+      timezone: "Europe/London"
+      units: [METERS_CUBED]
+    ) {
+      importReadings {
+        totalCount
+        edges {
+          node { value units intervalStart intervalEnd }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 class OctopusProbeError(RuntimeError):
@@ -140,18 +160,59 @@ def result_conclusion(kwh_count: int, m3_count: int) -> Tuple[str, str]:
     )
 
 
+def latest_reading(
+    readings: Sequence[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if not readings:
+        return None
+    return max(
+        readings,
+        key=lambda reading: str(
+            reading.get("intervalEnd") or reading.get("intervalStart") or ""
+        ),
+    )
+
+
+def accumulation_conclusion(
+    accumulation_count: int,
+    interval_m3_count: int,
+    accumulation_error: Optional[str] = None,
+) -> Tuple[str, str]:
+    if accumulation_count:
+        return (
+            "Direct cumulative meter reading available",
+            "Octopus returned an accumulation value that can be tested as the direct Tado meter reading.",
+        )
+    if accumulation_error:
+        return (
+            "Cumulative reading unavailable",
+            "Octopus rejected the accumulation query; interval consumption must not be presented as an actual meter register.",
+        )
+    if interval_m3_count:
+        return (
+            "Only interval usage available",
+            "Octopus returned interval consumption but no cumulative meter-register reading.",
+        )
+    return ("Inconclusive", "No gas readings were returned for the selected period.")
+
+
 def build_report(
     start: datetime,
     end: datetime,
     kwh_readings: Sequence[Dict[str, Any]],
     m3_readings: Sequence[Dict[str, Any]],
+    accumulation_readings: Sequence[Dict[str, Any]],
+    accumulation_error: Optional[str] = None,
 ) -> str:
     kwh_total = decimal_total(kwh_readings)
     m3_total = decimal_total(m3_readings)
-    status, explanation = result_conclusion(len(kwh_readings), len(m3_readings))
+    latest_accumulation = latest_reading(accumulation_readings)
+    status, explanation = accumulation_conclusion(
+        len(accumulation_readings), len(m3_readings), accumulation_error
+    )
 
     lines = [
-        "# Octopus direct kWh API check",
+        "# Octopus gas readings API check",
         "",
         f"**Result:** {status}",
         "",
@@ -159,11 +220,31 @@ def build_report(
         "",
         f"Period tested: {start.isoformat()} to {end.isoformat()}",
         "",
-        "| Requested unit | Daily readings | Total | Returned units |",
+        "| Dataset | Rows | Result | Returned units |",
         "|---|---:|---:|---|",
         f"| kWh | {len(kwh_readings)} | {kwh_total} | {returned_units(kwh_readings)} |",
         f"| m³ | {len(m3_readings)} | {m3_total} | {returned_units(m3_readings)} |",
     ]
+
+    if latest_accumulation:
+        accumulation_value = latest_accumulation.get("value", "unknown")
+        accumulation_timestamp = (
+            latest_accumulation.get("intervalEnd")
+            or latest_accumulation.get("intervalStart")
+            or "unknown"
+        )
+        lines.append(
+            f"| Cumulative meter register (m3) | {len(accumulation_readings)} | Latest: {accumulation_value} | {returned_units(accumulation_readings)} |"
+        )
+        lines.extend(
+            ["", f"Latest cumulative reading timestamp: {accumulation_timestamp}"]
+        )
+    elif accumulation_error:
+        lines.append(
+            f"| Cumulative meter register (m3) | 0 | API error: {accumulation_error} | none |"
+        )
+    else:
+        lines.append("| Cumulative meter register (m3) | 0 | No readings | none |")
 
     if kwh_total and m3_total:
         lines.extend(
@@ -187,7 +268,17 @@ def build_report(
                     unit=reading.get("units", "unknown"),
                 )
             )
-    if not kwh_readings and not m3_readings:
+    for reading in accumulation_readings:
+        lines.append(
+            "| Accumulation m3 | {start} | {end} | {value} | {unit} |".format(
+                start=reading.get("intervalStart", "unknown"),
+                end=reading.get("intervalEnd", "unknown"),
+                value=reading.get("value", "unknown"),
+                unit=reading.get("units", "unknown"),
+            )
+        )
+
+    if not kwh_readings and not m3_readings and not accumulation_readings:
         lines.append("| — | — | — | — | — |")
 
     lines.extend(
@@ -213,11 +304,32 @@ def run_probe(api_key: str, mprn: str, days: int) -> str:
     supply_point = data.get("supplyPoint")
     if not isinstance(supply_point, dict):
         raise OctopusProbeError("Octopus returned no matching gas supply point")
+
+    accumulation_readings: List[Dict[str, Any]] = []
+    accumulation_error = None
+    try:
+        accumulation_data = graphql_request(
+            ACCUMULATION_QUERY,
+            {"mprn": mprn, "start": start.isoformat(), "end": end.isoformat()},
+            token=token,
+        )
+        accumulation_supply_point = accumulation_data.get("supplyPoint")
+        if isinstance(accumulation_supply_point, dict):
+            accumulation_readings = extract_readings(
+                accumulation_supply_point, "accumulation"
+            )
+        else:
+            accumulation_error = "Octopus returned no matching gas supply point"
+    except OctopusProbeError as exc:
+        accumulation_error = str(exc)
+
     return build_report(
         start,
         end,
         extract_readings(supply_point, "kwh"),
         extract_readings(supply_point, "m3"),
+        accumulation_readings,
+        accumulation_error,
     )
 
 
