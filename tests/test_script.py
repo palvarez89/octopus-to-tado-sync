@@ -6,6 +6,7 @@ import pytest
 
 from sync_octopus_tado import (
     DEFAULT_M3_TO_KWH_FACTOR,
+    append_github_step_summary,
     call_tado_method,
     get_consumption_since_date,
     get_consumption_unit_multiplier,
@@ -59,6 +60,21 @@ def test_get_meter_reading_with_delta_sync(mock_get):
     )
     # Should be 100 (previous) + 3.5 (delta) = 103.5
     assert total == 103.5
+
+
+def test_append_github_step_summary_writes_values(tmp_path, monkeypatch):
+    summary_path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+
+    append_github_step_summary(
+        "Meter sync",
+        [("Raw Octopus usage", "1.010 m3"), ("Converted usage", "11.299 kwh")],
+    )
+
+    summary = summary_path.read_text(encoding="utf-8")
+    assert "## Meter sync" in summary
+    assert "| Raw Octopus usage | 1.010 m3 |" in summary
+    assert "| Converted usage | 11.299 kwh |" in summary
 
 
 def test_consumption_unit_multiplier_converts_m3_to_kwh():

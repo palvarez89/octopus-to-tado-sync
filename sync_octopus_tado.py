@@ -27,6 +27,21 @@ def get_consumption_unit_multiplier(source_unit, target_unit, m3_to_kwh_factor):
     )
 
 
+def append_github_step_summary(title, rows):
+    """Append a Markdown value table to the GitHub Actions job summary."""
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+
+    with open(summary_path, "a", encoding="utf-8") as summary:
+        summary.write(f"## {title}\n\n")
+        summary.write("| Value | Result |\n|---|---|\n")
+        for label, value in rows:
+            safe_value = str(value).replace("|", "\\|").replace("\n", " ")
+            summary.write(f"| {label} | {safe_value} |\n")
+        summary.write("\n")
+
+
 def call_tado_method(tado, *method_names, **kwargs):
     """Call the first available Tado client method from a list of candidates."""
     for method_name in method_names:
@@ -428,6 +443,8 @@ def get_meter_reading_total_consumption(
     data_delay_days=2,
     include_reading_date=False,
     consumption_multiplier=1.0,
+    source_unit="source units",
+    target_unit="target units",
 ):
     """
     Retrieves total gas consumption and calculates the delta since last Tado reading.
@@ -454,6 +471,18 @@ def get_meter_reading_total_consumption(
                     f"cutoff {cutoff_date} is not after latest Tado reading "
                     f"{latest_tado_date}. Skipping meter update."
                 )
+                append_github_step_summary(
+                    "Meter sync",
+                    [
+                        ("Status", "Skipped - waiting for a complete new period"),
+                        (
+                            "Latest Tado reading",
+                            f'{readings[0]["reading"]} {target_unit} on {latest_tado_date}',
+                        ),
+                        ("Octopus cutoff", cutoff_date),
+                        ("Octopus API queried", "No"),
+                    ],
+                )
                 return None
 
             checkpoint = get_tado_meter_checkpoint(readings)
@@ -476,6 +505,18 @@ def get_meter_reading_total_consumption(
             )
             if interval_count == 0:
                 print("Octopus returned no complete intervals. Skipping meter update.")
+                append_github_step_summary(
+                    "Meter sync",
+                    [
+                        ("Status", "Skipped - Octopus returned no intervals"),
+                        (
+                            "Tado checkpoint",
+                            f"{checkpoint_value} {target_unit} on {checkpoint_date}",
+                        ),
+                        ("Octopus period", f"{checkpoint_date} to {cutoff_date}"),
+                        ("Octopus intervals", 0),
+                    ],
+                )
                 return None
 
             raw_consumption_delta = consumption_delta
@@ -489,6 +530,28 @@ def get_meter_reading_total_consumption(
             print(f"Consumption delta since last reading: {consumption_delta}")
             print(f"New total consumption: {total_consumption}")
 
+            append_github_step_summary(
+                "Meter sync calculation",
+                [
+                    ("Status", "Ready to submit"),
+                    (
+                        "Tado checkpoint",
+                        f"{checkpoint_value:.3f} {target_unit} on {checkpoint_date}",
+                    ),
+                    ("Octopus period", f"{checkpoint_date} to {cutoff_date}"),
+                    ("Octopus intervals", interval_count),
+                    (
+                        "Raw Octopus usage",
+                        f"{raw_consumption_delta:.3f} {source_unit}",
+                    ),
+                    ("Conversion multiplier", f"{consumption_multiplier:.6f}"),
+                    ("Converted usage", f"{consumption_delta:.3f} {target_unit}"),
+                    (
+                        "Proposed Tado reading",
+                        f"{total_consumption:.3f} {target_unit} on {cutoff_date}",
+                    ),
+                ],
+            )
             if include_reading_date:
                 return total_consumption, cutoff_date
             return total_consumption
@@ -528,12 +591,33 @@ def get_meter_reading_total_consumption(
 
     if interval_count == 0:
         print("Octopus returned no complete intervals. Skipping meter update.")
+        append_github_step_summary(
+            "Meter sync",
+            [
+                ("Status", "Skipped - Octopus returned no intervals"),
+                ("Octopus period", f"{period_from} to {cutoff_date}"),
+                ("Octopus intervals", 0),
+            ],
+        )
         return None
 
     total_consumption *= consumption_multiplier
     print(
         "Total consumption (fallback - all available Octopus data): "
         f"{total_consumption}"
+    )
+    append_github_step_summary(
+        "Meter sync calculation",
+        [
+            ("Status", "Ready to submit using fallback baseline"),
+            ("Octopus period", f"{period_from} to {cutoff_date}"),
+            ("Octopus intervals", interval_count),
+            ("Conversion multiplier", f"{consumption_multiplier:.6f}"),
+            (
+                "Proposed Tado reading",
+                f"{total_consumption:.3f} {target_unit} on {cutoff_date}",
+            ),
+        ],
     )
     if include_reading_date:
         return total_consumption, cutoff_date
@@ -631,6 +715,14 @@ def send_reading_to_tado_client(tado, reading, reading_date=None):
         **payload,
     )
     print(result)
+    append_github_step_summary(
+        "Tado submission",
+        [
+            ("Status", "Submitted"),
+            ("Reading", payload["reading"]),
+            ("Reading date", payload.get("date", "today")),
+        ],
+    )
 
 
 def parse_args():
@@ -711,6 +803,8 @@ def main():
         tado=tado,
         include_reading_date=True,
         consumption_multiplier=consumption_multiplier,
+        source_unit=args.octopus_consumption_unit,
+        target_unit=args.tado_reading_unit,
     )
 
     if meter_update is not None:
