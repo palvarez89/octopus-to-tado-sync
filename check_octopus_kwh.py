@@ -9,8 +9,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlencode
 
 import requests
+from requests.auth import HTTPBasicAuth
 
 GRAPHQL_URL = "https://api.octopus.energy/v1/graphql/"
 TOKEN_QUERY = """
@@ -454,6 +456,99 @@ def redact_message(message: str, identifiers: Sequence[Optional[str]]) -> str:
     return message
 
 
+def latest_actual_meter_anchor(
+    meter_results: Sequence[Sequence[Dict[str, Any]]],
+) -> Optional[Tuple[Decimal, str]]:
+    candidates: List[Tuple[str, Decimal]] = []
+    for readings in meter_results:
+        for reading in readings:
+            read_at = str(reading.get("readAt") or "")
+            if not read_at:
+                continue
+            for register in reading.get("registers") or []:
+                if register.get("isQuarantined") is True:
+                    continue
+                try:
+                    value = Decimal(str(register["value"]))
+                except (KeyError, InvalidOperation, TypeError, ValueError):
+                    continue
+                candidates.append((read_at, value))
+    if not candidates:
+        return None
+    read_at, value = max(candidates, key=lambda candidate: candidate[0])
+    return value, read_at
+
+
+def fetch_octopus_consumption_total(
+    api_key: str,
+    mprn: str,
+    gas_serial_number: str,
+    period_from: str,
+    period_to: str,
+) -> Tuple[Decimal, int]:
+    query = urlencode(
+        {
+            "period_from": period_from,
+            "period_to": period_to,
+            "order_by": "period",
+            "group_by": "day",
+            "page_size": 25000,
+        }
+    )
+    url = (
+        f"https://api.octopus.energy/v1/gas-meter-points/{mprn}/meters/"
+        f"{gas_serial_number}/consumption/?{query}"
+    )
+    total = Decimal("0")
+    interval_count = 0
+    while url:
+        response = requests.get(url, auth=HTTPBasicAuth(api_key, ""), timeout=30)
+        if response.status_code != 200:
+            raise OctopusProbeError(
+                "Octopus consumption API returned HTTP " f"{response.status_code}"
+            )
+        payload = response.json()
+        for interval in payload.get("results") or []:
+            try:
+                total += Decimal(str(interval["consumption"]))
+            except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+                raise OctopusProbeError(
+                    "Octopus returned an invalid consumption value"
+                ) from exc
+            interval_count += 1
+        url = payload.get("next")
+    return total, interval_count
+
+
+def build_reconstructed_register_report(
+    anchor: Optional[Tuple[Decimal, str]],
+    usage: Optional[Decimal],
+    interval_count: int,
+    cutoff: str,
+    error: Optional[str] = None,
+) -> str:
+    lines = ["", "## Reconstructed physical meter register", ""]
+    if error:
+        lines.append(f"API error: {error}")
+    elif anchor is None or usage is None:
+        lines.append("No usable actual meter-reading anchor was returned.")
+    else:
+        anchor_value, anchor_date = anchor
+        reconstructed = anchor_value + usage
+        lines.extend(
+            [
+                "| Value | Result |",
+                "|---|---:|",
+                f"| Actual meter-reading anchor | {anchor_value} m3 on {anchor_date} |",
+                f"| Octopus usage since anchor | {usage} m3 ({interval_count} intervals) |",
+                f"| Reconstructed physical register | {reconstructed} m3 on {cutoff} |",
+                "",
+                "This calculation is read-only and was not submitted to Tado.",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
 def build_actual_meter_readings_report(
     meter_results: Sequence[Sequence[Dict[str, Any]]],
     error: Optional[str] = None,
@@ -775,6 +870,32 @@ def run_probe(
     report += build_actual_meter_readings_report(
         actual_meter_results,
         "; ".join(actual_meter_errors) if actual_meter_errors else None,
+    )
+    anchor = latest_actual_meter_anchor(actual_meter_results)
+    reconstruction_error = None
+    reconstructed_usage = None
+    reconstruction_interval_count = 0
+    cutoff_date = (end.date() - timedelta(days=2)).isoformat()
+    cutoff_datetime = f"{cutoff_date}T00:00:00Z"
+    if anchor:
+        try:
+            reconstructed_usage, reconstruction_interval_count = (
+                fetch_octopus_consumption_total(
+                    api_key,
+                    mprn,
+                    gas_serial_number or "",
+                    anchor[1],
+                    cutoff_datetime,
+                )
+            )
+        except (OctopusProbeError, requests.RequestException) as exc:
+            reconstruction_error = redact_message(str(exc), (mprn, gas_serial_number))
+    report += build_reconstructed_register_report(
+        anchor,
+        reconstructed_usage,
+        reconstruction_interval_count,
+        cutoff_date,
+        reconstruction_error,
     )
     return report
 

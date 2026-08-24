@@ -224,3 +224,64 @@ def test_actual_meter_report_shows_values_without_identifiers():
     assert "2026-08-23T01:00:00+01:00" in report
     assert "SECRET-REGISTER" not in report
     assert "SECRET-NAME" not in report
+
+
+def test_latest_actual_meter_anchor_uses_newest_non_quarantined_value():
+    results = [
+        [
+            {
+                "readAt": "2022-12-24T00:00:00+00:00",
+                "registers": [{"value": "5039.00000", "isQuarantined": False}],
+            },
+            {
+                "readAt": "2023-01-24T00:00:00+00:00",
+                "registers": [{"value": "9999", "isQuarantined": True}],
+            },
+        ]
+    ]
+    assert probe.latest_actual_meter_anchor(results) == (
+        Decimal("5039.00000"),
+        "2022-12-24T00:00:00+00:00",
+    )
+
+
+def test_fetch_octopus_consumption_total_sums_intervals(monkeypatch):
+    response = type(
+        "Response",
+        (),
+        {
+            "status_code": 200,
+            "json": lambda self: {
+                "results": [
+                    {"consumption": "1.010"},
+                    {"consumption": "0.25"},
+                ],
+                "next": None,
+            },
+        },
+    )()
+    requested_urls = []
+
+    def fake_get(url, *args, **kwargs):
+        requested_urls.append(url)
+        return response
+
+    monkeypatch.setattr(probe.requests, "get", fake_get)
+    total, count = probe.fetch_octopus_consumption_total(
+        "api-key", "mprn", "serial", "2022-12-24", "2026-08-22"
+    )
+    assert total == Decimal("1.260")
+    assert count == 2
+    assert "group_by=day" in requested_urls[0]
+    assert "page_size=25000" in requested_urls[0]
+
+
+def test_reconstructed_register_report_adds_usage_to_actual_anchor():
+    report = probe.build_reconstructed_register_report(
+        (Decimal("5039"), "2022-12-24T00:00:00+00:00"),
+        Decimal("6956.610"),
+        64000,
+        "2026-08-22",
+    )
+    assert "11995.610 m3" in report
+    assert "not submitted to Tado" in report
