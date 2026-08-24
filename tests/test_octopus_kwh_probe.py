@@ -253,8 +253,16 @@ def test_fetch_octopus_consumption_total_sums_intervals(monkeypatch):
             "status_code": 200,
             "json": lambda self: {
                 "results": [
-                    {"consumption": "1.010"},
-                    {"consumption": "0.25"},
+                    {
+                        "consumption": "1.010",
+                        "interval_start": "2024-08-24T00:00:00+01:00",
+                        "interval_end": "2024-08-25T00:00:00+01:00",
+                    },
+                    {
+                        "consumption": "0.25",
+                        "interval_start": "2024-08-25T00:00:00+01:00",
+                        "interval_end": "2024-08-26T00:00:00+01:00",
+                    },
                 ],
                 "next": None,
             },
@@ -267,11 +275,13 @@ def test_fetch_octopus_consumption_total_sums_intervals(monkeypatch):
         return response
 
     monkeypatch.setattr(probe.requests, "get", fake_get)
-    total, count = probe.fetch_octopus_consumption_total(
+    total, count, coverage_start, coverage_end = probe.fetch_octopus_consumption_total(
         "api-key", "mprn", "serial", "2022-12-24", "2026-08-22"
     )
     assert total == Decimal("1.260")
     assert count == 2
+    assert coverage_start == "2024-08-24T00:00:00+01:00"
+    assert coverage_end == "2024-08-26T00:00:00+01:00"
     assert "group_by=day" in requested_urls[0]
     assert "page_size=25000" in requested_urls[0]
 
@@ -279,9 +289,37 @@ def test_fetch_octopus_consumption_total_sums_intervals(monkeypatch):
 def test_reconstructed_register_report_adds_usage_to_actual_anchor():
     report = probe.build_reconstructed_register_report(
         (Decimal("5039"), "2022-12-24T00:00:00+00:00"),
-        Decimal("6956.610"),
+        Decimal("3814.481"),
         64000,
         "2026-08-22",
+        "2024-08-24T00:00:00+01:00",
+        "2026-08-22T00:00:00+01:00",
     )
-    assert "11995.610 m3" in report
+    assert "8853.481 m3" in report
+    assert "Incomplete - do not use as a meter reading" in report
     assert "not submitted to Tado" in report
+
+
+def test_cumulative_calibration_derives_corrected_register():
+    historical = reading("10078", "METERS_CUBED")
+    current = reading("23991.220", "METERS_CUBED")
+    report = probe.build_cumulative_calibration_report(
+        (Decimal("5039"), "2022-12-24T00:00:00+00:00"),
+        historical,
+        current,
+    )
+    assert "Observed aggregate factor | 2" in report
+    assert "11995.610 m3" in report
+
+
+def test_closest_accumulation_selects_reading_nearest_anchor():
+    earlier = reading("10070", "METERS_CUBED", "2022-12-23T00:00:00+00:00")
+    earlier["intervalEnd"] = "2022-12-24T00:00:00+00:00"
+    later = reading("10080", "METERS_CUBED", "2022-12-25T00:00:00+00:00")
+    later["intervalEnd"] = "2022-12-26T00:00:00+00:00"
+    assert (
+        probe.closest_accumulation_to_time(
+            [later, earlier], "2022-12-24T00:00:00+00:00"
+        )
+        is earlier
+    )

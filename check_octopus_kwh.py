@@ -485,7 +485,7 @@ def fetch_octopus_consumption_total(
     gas_serial_number: str,
     period_from: str,
     period_to: str,
-) -> Tuple[Decimal, int]:
+) -> Tuple[Decimal, int, Optional[str], Optional[str]]:
     query = urlencode(
         {
             "period_from": period_from,
@@ -501,6 +501,8 @@ def fetch_octopus_consumption_total(
     )
     total = Decimal("0")
     interval_count = 0
+    coverage_starts: List[str] = []
+    coverage_ends: List[str] = []
     while url:
         response = requests.get(url, auth=HTTPBasicAuth(api_key, ""), timeout=30)
         if response.status_code != 200:
@@ -515,9 +517,18 @@ def fetch_octopus_consumption_total(
                 raise OctopusProbeError(
                     "Octopus returned an invalid consumption value"
                 ) from exc
+            if interval.get("interval_start"):
+                coverage_starts.append(str(interval["interval_start"]))
+            if interval.get("interval_end"):
+                coverage_ends.append(str(interval["interval_end"]))
             interval_count += 1
         url = payload.get("next")
-    return total, interval_count
+    return (
+        total,
+        interval_count,
+        min(coverage_starts) if coverage_starts else None,
+        max(coverage_ends) if coverage_ends else None,
+    )
 
 
 def build_reconstructed_register_report(
@@ -525,6 +536,8 @@ def build_reconstructed_register_report(
     usage: Optional[Decimal],
     interval_count: int,
     cutoff: str,
+    coverage_start: Optional[str] = None,
+    coverage_end: Optional[str] = None,
     error: Optional[str] = None,
 ) -> str:
     lines = ["", "## Reconstructed physical meter register", ""]
@@ -535,17 +548,91 @@ def build_reconstructed_register_report(
     else:
         anchor_value, anchor_date = anchor
         reconstructed = anchor_value + usage
+        coverage_complete = False
+        if coverage_start and coverage_end:
+            anchor_time = datetime.fromisoformat(anchor_date.replace("Z", "+00:00"))
+            requested_end = datetime.fromisoformat(f"{cutoff}T00:00:00+00:00")
+            actual_start = datetime.fromisoformat(coverage_start.replace("Z", "+00:00"))
+            actual_end = datetime.fromisoformat(coverage_end.replace("Z", "+00:00"))
+            coverage_complete = (
+                actual_start <= anchor_time and actual_end >= requested_end
+            )
         lines.extend(
             [
                 "| Value | Result |",
                 "|---|---:|",
                 f"| Actual meter-reading anchor | {anchor_value} m3 on {anchor_date} |",
-                f"| Octopus usage since anchor | {usage} m3 ({interval_count} intervals) |",
-                f"| Reconstructed physical register | {reconstructed} m3 on {cutoff} |",
+                f"| REST coverage returned | {coverage_start or 'unknown'} to {coverage_end or 'unknown'} |",
+                f"| Octopus usage returned | {usage} m3 ({interval_count} intervals) |",
+                f"| Partial reconstruction | {reconstructed} m3 on {cutoff} |",
+                f"| Coverage status | {'Complete' if coverage_complete else 'Incomplete - do not use as a meter reading'} |",
                 "",
                 "This calculation is read-only and was not submitted to Tado.",
             ]
         )
+    return "\n".join(lines) + "\n"
+
+
+def closest_accumulation_to_time(
+    readings: Sequence[Dict[str, Any]], target: str
+) -> Optional[Dict[str, Any]]:
+    target_time = datetime.fromisoformat(target.replace("Z", "+00:00"))
+    candidates = []
+    for reading in readings:
+        timestamp = reading.get("intervalEnd") or reading.get("intervalStart")
+        if not timestamp:
+            continue
+        reading_time = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        candidates.append((abs(reading_time - target_time), reading))
+    return (
+        min(candidates, key=lambda candidate: candidate[0])[1] if candidates else None
+    )
+
+
+def build_cumulative_calibration_report(
+    anchor: Optional[Tuple[Decimal, str]],
+    historical_accumulation: Optional[Dict[str, Any]],
+    current_accumulation: Optional[Dict[str, Any]],
+    error: Optional[str] = None,
+) -> str:
+    lines = ["", "## Cumulative-series calibration", ""]
+    if error:
+        lines.append(f"API error: {error}")
+    elif not anchor or not historical_accumulation or not current_accumulation:
+        lines.append("Insufficient readings to calibrate the cumulative series.")
+    else:
+        anchor_value, anchor_date = anchor
+        try:
+            historical_value = Decimal(str(historical_accumulation["value"]))
+            current_value = Decimal(str(current_accumulation["value"]))
+            factor = historical_value / anchor_value
+            corrected_current = current_value / factor
+        except (KeyError, InvalidOperation, TypeError, ValueError, ZeroDivisionError):
+            lines.append("Octopus returned an invalid calibration value.")
+        else:
+            historical_date = (
+                historical_accumulation.get("intervalEnd")
+                or historical_accumulation.get("intervalStart")
+                or "unknown"
+            )
+            current_date = (
+                current_accumulation.get("intervalEnd")
+                or current_accumulation.get("intervalStart")
+                or "unknown"
+            )
+            lines.extend(
+                [
+                    "| Value | Result |",
+                    "|---|---:|",
+                    f"| Actual anchor | {anchor_value} m3 on {anchor_date} |",
+                    f"| Aggregate near anchor | {historical_value} m3 on {historical_date} |",
+                    f"| Observed aggregate factor | {factor} |",
+                    f"| Latest aggregate | {current_value} m3 on {current_date} |",
+                    f"| Factor-corrected current register | {corrected_current} m3 |",
+                    "",
+                    "This calibration is read-only and was not submitted to Tado.",
+                ]
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -875,18 +962,23 @@ def run_probe(
     reconstruction_error = None
     reconstructed_usage = None
     reconstruction_interval_count = 0
+    reconstruction_coverage_start = None
+    reconstruction_coverage_end = None
     cutoff_date = (end.date() - timedelta(days=2)).isoformat()
     cutoff_datetime = f"{cutoff_date}T00:00:00Z"
     if anchor:
         try:
-            reconstructed_usage, reconstruction_interval_count = (
-                fetch_octopus_consumption_total(
-                    api_key,
-                    mprn,
-                    gas_serial_number or "",
-                    anchor[1],
-                    cutoff_datetime,
-                )
+            (
+                reconstructed_usage,
+                reconstruction_interval_count,
+                reconstruction_coverage_start,
+                reconstruction_coverage_end,
+            ) = fetch_octopus_consumption_total(
+                api_key,
+                mprn,
+                gas_serial_number or "",
+                anchor[1],
+                cutoff_datetime,
             )
         except (OctopusProbeError, requests.RequestException) as exc:
             reconstruction_error = redact_message(str(exc), (mprn, gas_serial_number))
@@ -895,7 +987,43 @@ def run_probe(
         reconstructed_usage,
         reconstruction_interval_count,
         cutoff_date,
+        reconstruction_coverage_start,
+        reconstruction_coverage_end,
         reconstruction_error,
+    )
+
+    historical_accumulation = None
+    calibration_error = None
+    if anchor:
+        anchor_time = datetime.fromisoformat(anchor[1].replace("Z", "+00:00"))
+        try:
+            historical_data = graphql_request(
+                ACCUMULATION_QUERY,
+                {
+                    "mprn": mprn,
+                    "start": (anchor_time - timedelta(days=1)).isoformat(),
+                    "end": (anchor_time + timedelta(days=2)).isoformat(),
+                },
+                token=token,
+            )
+            historical_supply_point = historical_data.get("supplyPoint")
+            if not isinstance(historical_supply_point, dict):
+                raise OctopusProbeError(
+                    "Octopus returned no historical gas supply point"
+                )
+            historical_readings = extract_readings(
+                historical_supply_point, "accumulation"
+            )
+            historical_accumulation = closest_accumulation_to_time(
+                historical_readings, anchor[1]
+            )
+        except OctopusProbeError as exc:
+            calibration_error = redact_message(str(exc), (mprn, gas_serial_number))
+    report += build_cumulative_calibration_report(
+        anchor,
+        historical_accumulation,
+        latest_reading(accumulation_readings),
+        calibration_error,
     )
     return report
 
