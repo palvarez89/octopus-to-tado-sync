@@ -79,11 +79,12 @@ query GasAccumulationReadings($mprn: String!, $start: DateTime!, $end: DateTime!
 DEVICE_ACCUMULATION_QUERY = """
 query GasDeviceAccumulationReadings(
   $mprn: String!
+  $gasSerial: String!
   $start: DateTime!
   $end: DateTime!
 ) {
   supplyPoint(externalIdentifier: $mprn, marketName: "GBR_GAS") {
-    devices(first: 20) {
+    devices(deviceIdentifiers: [$gasSerial], first: 5) {
       totalCount
       edges {
         node {
@@ -101,6 +102,25 @@ query GasDeviceAccumulationReadings(
               }
             }
           }
+        }
+      }
+    }
+  }
+}
+"""
+REGISTER_ACCUMULATION_QUERY = """
+query GasRegisterAccumulationReadings(
+  $mprn: String!
+  $gasSerial: String!
+  $start: DateTime!
+  $end: DateTime!
+) {
+  supplyPoint(externalIdentifier: $mprn, marketName: "GBR_GAS") {
+    devices(deviceIdentifiers: [$gasSerial], first: 5) {
+      totalCount
+      edges {
+        node {
+          deviceIdentifier
           registers(first: 20) {
             totalCount
             edges {
@@ -267,9 +287,21 @@ def latest_value_and_time(
 
 
 def build_device_report(
-    supply_point: Dict[str, Any], gas_serial_number: Optional[str]
+    device_supply_point: Optional[Dict[str, Any]],
+    register_supply_point: Optional[Dict[str, Any]],
+    gas_serial_number: Optional[str],
+    device_error: Optional[str] = None,
+    register_error: Optional[str] = None,
 ) -> str:
-    devices = connection_nodes(supply_point.get("devices", {}))
+    devices = connection_nodes((device_supply_point or {}).get("devices", {}))
+    register_devices = connection_nodes(
+        (register_supply_point or {}).get("devices", {})
+    )
+    if gas_serial_number:
+        if device_error:
+            device_error = device_error.replace(gas_serial_number, "[redacted]")
+        if register_error:
+            register_error = register_error.replace(gas_serial_number, "[redacted]")
     lines = [
         "",
         "## Per-device and per-register accumulation",
@@ -286,11 +318,16 @@ def build_device_report(
         matched_configured_meter = matched_configured_meter or is_match
         device_readings = extract_readings(device, "deviceAccumulation")
         device_value, device_timestamp = latest_value_and_time(device_readings)
-        registers = connection_nodes(device.get("registers", {}))
         lines.append(
             f"| Device {device_index} | {'Yes' if is_match else 'No'} | "
             f"{len(device_readings)} | {device_value} | {device_timestamp} |"
         )
+
+    for device_index, device in enumerate(register_devices, start=1):
+        device_identifier = str(device.get("deviceIdentifier") or "")
+        is_match = bool(gas_serial_number and device_identifier == gas_serial_number)
+        matched_configured_meter = matched_configured_meter or is_match
+        registers = connection_nodes(device.get("registers", {}))
         for register_index, register in enumerate(registers, start=1):
             register_readings = extract_readings(register, "registerAccumulation")
             register_value, register_timestamp = latest_value_and_time(
@@ -302,9 +339,30 @@ def build_device_report(
                 f"{register_value} | {register_timestamp} |"
             )
 
-    if not devices:
-        lines.append("| No devices returned | No | 0 | none | none |")
-    if gas_serial_number and not matched_configured_meter:
+    if device_error:
+        lines.append(
+            f"| Device query | Unknown | 0 | API error: {device_error} | none |"
+        )
+    elif not devices:
+        lines.append("| No matching device returned | No | 0 | none | none |")
+    if register_error:
+        lines.append(
+            f"| Register query | Unknown | 0 | API error: {register_error} | none |"
+        )
+    elif not register_devices:
+        lines.append(
+            "| No matching device returned for register query | No | 0 | none | none |"
+        )
+    elif not any(
+        connection_nodes(device.get("registers", {})) for device in register_devices
+    ):
+        lines.append("| No registers returned | No | 0 | none | none |")
+
+    if (
+        gas_serial_number
+        and (not device_error or not register_error)
+        and not matched_configured_meter
+    ):
         lines.extend(
             [
                 "",
@@ -457,22 +515,53 @@ def run_probe(
         accumulation_readings,
         accumulation_error,
     )
-    try:
-        device_data = graphql_request(
-            DEVICE_ACCUMULATION_QUERY,
-            {"mprn": mprn, "start": start.isoformat(), "end": end.isoformat()},
-            token=token,
-        )
-        device_supply_point = device_data.get("supplyPoint")
-        if not isinstance(device_supply_point, dict):
-            raise OctopusProbeError(
-                "Octopus returned no matching gas supply point for devices"
+    device_supply_point = None
+    register_supply_point = None
+    device_error = None
+    register_error = None
+    device_variables = {
+        "mprn": mprn,
+        "gasSerial": gas_serial_number,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+    }
+    if gas_serial_number:
+        try:
+            device_data = graphql_request(
+                DEVICE_ACCUMULATION_QUERY, device_variables, token=token
             )
-        report += build_device_report(device_supply_point, gas_serial_number)
-    except OctopusProbeError as exc:
-        report += (
-            "\n## Per-device and per-register accumulation\n\n" f"API error: {exc}\n"
-        )
+            candidate = device_data.get("supplyPoint")
+            if not isinstance(candidate, dict):
+                raise OctopusProbeError(
+                    "Octopus returned no matching gas supply point for the device"
+                )
+            device_supply_point = candidate
+        except OctopusProbeError as exc:
+            device_error = str(exc)
+
+        try:
+            register_data = graphql_request(
+                REGISTER_ACCUMULATION_QUERY, device_variables, token=token
+            )
+            candidate = register_data.get("supplyPoint")
+            if not isinstance(candidate, dict):
+                raise OctopusProbeError(
+                    "Octopus returned no matching gas supply point for registers"
+                )
+            register_supply_point = candidate
+        except OctopusProbeError as exc:
+            register_error = str(exc)
+    else:
+        device_error = "No configured gas serial was provided"
+        register_error = "No configured gas serial was provided"
+
+    report += build_device_report(
+        device_supply_point,
+        register_supply_point,
+        gas_serial_number,
+        device_error,
+        register_error,
+    )
     return report
 
 
