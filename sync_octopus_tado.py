@@ -1,7 +1,8 @@
 import argparse
 import asyncio
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from urllib.parse import quote, urlencode
 
 import requests
@@ -9,7 +10,90 @@ from playwright.async_api import async_playwright
 from PyTado.interface import Tado
 from requests.auth import HTTPBasicAuth
 
+import check_octopus_kwh as octopus_probe
+
 DEFAULT_M3_TO_KWH_FACTOR = 11.1868
+
+
+def accumulation_effective_date(reading):
+    """Return the consumption date represented by an accumulation interval end."""
+    timestamp = reading.get("intervalEnd") or reading.get("intervalStart")
+    if not timestamp:
+        return None
+    return parse_api_date(timestamp) - timedelta(days=1)
+
+
+def get_calibrated_cumulative_delta(
+    api_key, mprn, checkpoint_date, cutoff_date, calibration_days=14
+):
+    """Return a guarded physical-register delta from Octopus accumulation data."""
+    query_start = min(
+        checkpoint_date - timedelta(days=2),
+        cutoff_date - timedelta(days=calibration_days),
+    )
+    query_end = cutoff_date + timedelta(days=2)
+    token = octopus_probe.obtain_token(api_key)
+    variables = {
+        "mprn": mprn,
+        "start": datetime.combine(
+            query_start, datetime.min.time(), tzinfo=timezone.utc
+        ).isoformat(),
+        "end": datetime.combine(
+            query_end, datetime.min.time(), tzinfo=timezone.utc
+        ).isoformat(),
+    }
+    interval_data = octopus_probe.graphql_request(
+        octopus_probe.READINGS_QUERY, variables, token=token
+    )
+    accumulation_data = octopus_probe.graphql_request(
+        octopus_probe.ACCUMULATION_QUERY, variables, token=token
+    )
+    interval_supply = interval_data.get("supplyPoint")
+    accumulation_supply = accumulation_data.get("supplyPoint")
+    if not isinstance(interval_supply, dict) or not isinstance(
+        accumulation_supply, dict
+    ):
+        raise RuntimeError("Octopus returned no matching cumulative gas supply point")
+
+    interval_readings = octopus_probe.extract_readings(interval_supply, "m3")
+    accumulation_readings = octopus_probe.extract_readings(
+        accumulation_supply, "accumulation"
+    )
+    ratios = octopus_probe.accumulation_delta_ratios(
+        interval_readings, accumulation_readings
+    )
+    factor = octopus_probe.decimal_median(ratios)
+    if (
+        factor is None
+        or factor == 0
+        or len(ratios) < 3
+        or any(abs(ratio - factor) > Decimal("0.01") for ratio in ratios)
+    ):
+        raise RuntimeError(
+            "Octopus cumulative calibration was not stable across at least 3 days"
+        )
+
+    by_date = {}
+    for reading in accumulation_readings:
+        effective_date = accumulation_effective_date(reading)
+        if effective_date is not None:
+            by_date[effective_date] = reading
+
+    checkpoint = by_date.get(checkpoint_date)
+    available_dates = [day for day in by_date if day <= cutoff_date]
+    if checkpoint is None or not available_dates:
+        raise RuntimeError(
+            "Octopus cumulative data does not cover the current Tado checkpoint"
+        )
+    reading_date = max(available_dates)
+    if reading_date <= checkpoint_date:
+        return None
+
+    latest = by_date[reading_date]
+    aggregate_delta = Decimal(str(latest["value"])) - Decimal(str(checkpoint["value"]))
+    if aggregate_delta <= 0:
+        raise RuntimeError("Octopus cumulative register did not increase")
+    return float(aggregate_delta / factor), reading_date, factor, len(ratios)
 
 
 def get_consumption_unit_multiplier(source_unit, target_unit, m3_to_kwh_factor):
@@ -445,6 +529,7 @@ def get_meter_reading_total_consumption(
     consumption_multiplier=1.0,
     source_unit="source units",
     target_unit="target units",
+    meter_source="consumption-delta",
 ):
     """
     Retrieves total gas consumption and calculates the delta since last Tado reading.
@@ -494,6 +579,56 @@ def get_meter_reading_total_consumption(
                     f"{checkpoint_value} on {checkpoint_date} to recover delayed data."
                 )
             print(f"Using delta sync: checkpoint Tado reading was {checkpoint_value}")
+
+            if meter_source == "calibrated-cumulative":
+                cumulative_update = get_calibrated_cumulative_delta(
+                    api_key, mprn, checkpoint_date, cutoff_date
+                )
+                if cumulative_update is None:
+                    print(
+                        "No newer calibrated Octopus cumulative reading is available. "
+                        "Skipping meter update."
+                    )
+                    return None
+                raw_consumption_delta, reading_date, factor, matched_days = (
+                    cumulative_update
+                )
+                if reading_date <= latest_tado_date:
+                    print(
+                        "The newest calibrated Octopus cumulative reading is not "
+                        "newer than Tado. Skipping meter update."
+                    )
+                    return None
+                consumption_delta = raw_consumption_delta * consumption_multiplier
+                total_consumption = checkpoint_value + consumption_delta
+                print(
+                    "Using calibrated Octopus cumulative register delta: "
+                    f"{raw_consumption_delta} {source_unit}"
+                )
+                append_github_step_summary(
+                    "Meter sync calculation",
+                    [
+                        ("Status", "Ready to submit from calibrated cumulative data"),
+                        (
+                            "Tado checkpoint",
+                            f"{checkpoint_value:.3f} {target_unit} on {checkpoint_date}",
+                        ),
+                        ("Matched stable calibration days", matched_days),
+                        ("Observed aggregate factor", factor),
+                        (
+                            "Corrected cumulative delta",
+                            f"{raw_consumption_delta:.3f} {source_unit}",
+                        ),
+                        ("Conversion multiplier", f"{consumption_multiplier:.6f}"),
+                        (
+                            "Proposed Tado reading",
+                            f"{total_consumption:.3f} {target_unit} on {reading_date}",
+                        ),
+                    ],
+                )
+                if include_reading_date:
+                    return total_consumption, reading_date
+                return total_consumption
 
             consumption_delta, interval_count = get_consumption_since_date(
                 api_key,
@@ -555,6 +690,20 @@ def get_meter_reading_total_consumption(
             if include_reading_date:
                 return total_consumption, cutoff_date
             return total_consumption
+
+    if meter_source == "calibrated-cumulative":
+        print(
+            "No previous Tado reading is available to anchor the calibrated "
+            "cumulative series. Skipping meter update."
+        )
+        append_github_step_summary(
+            "Meter sync",
+            [
+                ("Status", "Skipped - no Tado checkpoint for cumulative sync"),
+                ("Octopus API queried", "No"),
+            ],
+        )
+        return None
 
     print(
         "No previous Tado reading found, falling back to last 3 years of Octopus data"
@@ -773,6 +922,20 @@ def parse_args():
         help="Meter-reading unit configured in Tado Energy IQ (default: kwh).",
     )
     parser.add_argument(
+        "--meter-source",
+        choices=("consumption-delta", "calibrated-cumulative"),
+        default=os.getenv("METER_SOURCE", "consumption-delta").lower(),
+        help=(
+            "Use REST interval deltas or guarded GraphQL cumulative-register deltas "
+            "(default: consumption-delta)."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run-meter",
+        action="store_true",
+        help="Calculate and report the meter update without submitting it to Tado.",
+    )
+    parser.add_argument(
         "--m3-to-kwh-factor",
         type=float,
         default=float(os.getenv("M3_TO_KWH_FACTOR", str(DEFAULT_M3_TO_KWH_FACTOR))),
@@ -805,11 +968,29 @@ def main():
         consumption_multiplier=consumption_multiplier,
         source_unit=args.octopus_consumption_unit,
         target_unit=args.tado_reading_unit,
+        meter_source=args.meter_source,
     )
 
     if meter_update is not None:
         consumption, reading_date = meter_update
-        send_reading_to_tado_client(tado, consumption, reading_date)
+        if args.dry_run_meter:
+            print(
+                "Meter dry run: calculated reading was not submitted to Tado: "
+                f"{consumption:.3f} {args.tado_reading_unit} on {reading_date}"
+            )
+            append_github_step_summary(
+                "Tado submission",
+                [
+                    ("Status", "Dry run - not submitted"),
+                    (
+                        "Calculated reading",
+                        f"{consumption:.3f} {args.tado_reading_unit}",
+                    ),
+                    ("Reading date", reading_date),
+                ],
+            )
+        else:
+            send_reading_to_tado_client(tado, consumption, reading_date)
 
     if args.update_tariff:
         if not args.octopus_account_number:

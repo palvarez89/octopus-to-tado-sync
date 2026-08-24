@@ -1,5 +1,6 @@
 import sys
 from datetime import date
+from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,6 +9,7 @@ from sync_octopus_tado import (
     DEFAULT_M3_TO_KWH_FACTOR,
     append_github_step_summary,
     call_tado_method,
+    get_calibrated_cumulative_delta,
     get_consumption_since_date,
     get_consumption_unit_multiplier,
     get_meter_reading_total_consumption,
@@ -60,6 +62,122 @@ def test_get_meter_reading_with_delta_sync(mock_get):
     )
     # Should be 100 (previous) + 3.5 (delta) = 103.5
     assert total == 103.5
+
+
+@patch("sync_octopus_tado.get_calibrated_cumulative_delta")
+@patch("sync_octopus_tado.requests.get")
+def test_meter_sync_uses_calibrated_cumulative_delta(mock_get, mock_cumulative):
+    mock_cumulative.return_value = (
+        1.010,
+        date(2026, 8, 22),
+        Decimal("2"),
+        5,
+    )
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [{"reading": 3859, "date": "2026-08-20"}]
+    }
+
+    update = get_meter_reading_total_consumption(
+        "fake-api-key",
+        "123456789",
+        "GAS123",
+        tado=mock_tado,
+        today=date(2026, 8, 24),
+        include_reading_date=True,
+        consumption_multiplier=DEFAULT_M3_TO_KWH_FACTOR,
+        meter_source="calibrated-cumulative",
+    )
+
+    assert update[0] == pytest.approx(3859 + (1.010 * DEFAULT_M3_TO_KWH_FACTOR))
+    assert update[1] == date(2026, 8, 22)
+    mock_get.assert_not_called()
+
+
+@patch("sync_octopus_tado.get_calibrated_cumulative_delta")
+def test_meter_sync_rejects_cumulative_reading_not_newer_than_tado(mock_cumulative):
+    mock_cumulative.return_value = (
+        1.010,
+        date(2026, 8, 20),
+        Decimal("2"),
+        5,
+    )
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [{"reading": 3859, "date": "2026-08-20"}]
+    }
+
+    update = get_meter_reading_total_consumption(
+        "fake-api-key",
+        "123456789",
+        "GAS123",
+        tado=mock_tado,
+        today=date(2026, 8, 24),
+        include_reading_date=True,
+        meter_source="calibrated-cumulative",
+    )
+
+    assert update is None
+
+
+@patch("sync_octopus_tado.octopus_probe.graphql_request")
+@patch("sync_octopus_tado.octopus_probe.obtain_token", return_value="token")
+def test_calibrated_cumulative_delta_requires_stable_recent_factor(
+    mock_token, mock_graphql
+):
+    def item(value, end):
+        return {
+            "value": value,
+            "units": "METERS_CUBED",
+            "intervalStart": "2026-08-18T00:00:00+01:00",
+            "intervalEnd": end,
+        }
+
+    intervals = [
+        item("1.000", "2026-08-20T00:00:00+01:00"),
+        item("1.200", "2026-08-21T00:00:00+01:00"),
+        item("1.100", "2026-08-22T00:00:00+01:00"),
+        item("1.200", "2026-08-23T00:00:00+01:00"),
+    ]
+    accumulations = [
+        item("100.0", "2026-08-19T01:00:00+01:00"),
+        item("102.0", "2026-08-20T01:00:00+01:00"),
+        item("104.4", "2026-08-21T01:00:00+01:00"),
+        item("106.6", "2026-08-22T01:00:00+01:00"),
+        item("109.0", "2026-08-23T01:00:00+01:00"),
+    ]
+    mock_graphql.side_effect = [
+        {
+            "supplyPoint": {
+                "m3": {
+                    "importReadings": {
+                        "edges": [{"node": reading} for reading in intervals]
+                    }
+                }
+            }
+        },
+        {
+            "supplyPoint": {
+                "accumulation": {
+                    "importReadings": {
+                        "edges": [{"node": reading} for reading in accumulations]
+                    }
+                }
+            }
+        },
+    ]
+
+    delta, reading_date, factor, matches = get_calibrated_cumulative_delta(
+        "api-key",
+        "mprn",
+        date(2026, 8, 19),
+        date(2026, 8, 22),
+    )
+
+    assert delta == pytest.approx(3.5)
+    assert reading_date == date(2026, 8, 22)
+    assert factor == Decimal("2")
+    assert matches == 4
 
 
 def test_append_github_step_summary_writes_values(tmp_path, monkeypatch):
