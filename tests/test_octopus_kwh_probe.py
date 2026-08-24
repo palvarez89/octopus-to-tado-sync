@@ -106,15 +106,17 @@ def test_report_preserves_accumulation_api_error():
     assert "API error: Unsupported reading type" in report
 
 
-def test_device_query_splits_device_and_register_accumulations():
-    assert "devices(deviceIdentifiers: [$gasSerial]" in probe.DEVICE_ACCUMULATION_QUERY
+def test_device_query_splits_register_discovery_from_readings():
     assert "deviceAccumulation: readings(" in probe.DEVICE_ACCUMULATION_QUERY
     assert "registers(" not in probe.DEVICE_ACCUMULATION_QUERY
+    assert "registers(first: 20)" in probe.REGISTER_LIST_QUERY
+    assert "readings(" not in probe.REGISTER_LIST_QUERY
     assert (
-        "devices(deviceIdentifiers: [$gasSerial]" in probe.REGISTER_ACCUMULATION_QUERY
+        "registers(registerIdentifiers: [$registerIdentifier]"
+        in probe.REGISTER_READING_QUERY
     )
-    assert "registerAccumulation: readings(" in probe.REGISTER_ACCUMULATION_QUERY
-    assert "deviceAccumulation" not in probe.REGISTER_ACCUMULATION_QUERY
+    assert "readingType: $readingType" in probe.REGISTER_READING_QUERY
+    assert "timeGranularity: $timeGranularity" in probe.REGISTER_READING_QUERY
 
 
 def test_device_report_matches_serial_without_exposing_identifiers():
@@ -125,46 +127,42 @@ def test_device_report_matches_serial_without_exposing_identifiers():
                 "edges": [{"node": reading("11995.610", "METERS_CUBED")}]
             }
         },
-        "registers": {
-            "edges": [
-                {
-                    "node": {
-                        "registerIdentifier": "SECRET-REGISTER",
-                        "registerAccumulation": {
-                            "importReadings": {
-                                "edges": [
-                                    {"node": reading("11995.610", "METERS_CUBED")}
-                                ]
-                            }
-                        },
-                    }
-                }
-            ]
-        },
     }
     device_supply_point = {"devices": {"edges": [{"node": device}]}}
-    register_supply_point = {"devices": {"edges": [{"node": device}]}}
+    register_results = [
+        {
+            "accumulation_readings": [reading("11995.610", "METERS_CUBED")],
+            "interval_readings": [reading("1.010", "METERS_CUBED")],
+        }
+    ]
 
     report = probe.build_device_report(
-        device_supply_point, register_supply_point, "SECRET-SERIAL"
+        device_supply_point, register_results, "SECRET-SERIAL"
     )
 
-    assert "| Device 1 | Yes |" in report
-    assert "| Device 1 / Register 1 | Yes |" in report
+    assert "| Device 1 accumulation | Yes |" in report
+    assert "| Register 1 accumulation | Yes |" in report
+    assert "| Register 1 daily interval | Yes |" in report
+    assert "period total: 1.010" in report
     assert "11995.610" in report
     assert "SECRET-SERIAL" not in report
-    assert "SECRET-REGISTER" not in report
 
 
 def test_device_report_preserves_independent_query_failures():
     report = probe.build_device_report(
         None,
-        None,
+        [
+            {
+                "accumulation_error": "Accumulation failed",
+                "interval_error": "Interval failed",
+            }
+        ],
         "SECRET-SERIAL",
         device_error="Device SECRET-SERIAL lookup failed",
-        register_error="Register SECRET-SERIAL lookup failed",
+        register_list_error=None,
     )
 
     assert "API error: Device [redacted] lookup failed" in report
-    assert "API error: Register [redacted] lookup failed" in report
+    assert "API error: Accumulation failed" in report
+    assert "API error: Interval failed" in report
     assert "SECRET-SERIAL" not in report
