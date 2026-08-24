@@ -104,3 +104,45 @@ def test_report_preserves_accumulation_api_error():
 
     assert "Cumulative reading unavailable" in report
     assert "API error: Unsupported reading type" in report
+
+
+def test_device_query_requests_device_and_register_accumulations():
+    assert "devices(first: 20)" in probe.DEVICE_ACCUMULATION_QUERY
+    assert "deviceAccumulation: readings(" in probe.DEVICE_ACCUMULATION_QUERY
+    assert "registerAccumulation: readings(" in probe.DEVICE_ACCUMULATION_QUERY
+
+
+def test_device_report_matches_serial_without_exposing_identifiers():
+    device = {
+        "deviceIdentifier": "SECRET-SERIAL",
+        "deviceAccumulation": {
+            "importReadings": {
+                "edges": [{"node": reading("11995.610", "METERS_CUBED")}]
+            }
+        },
+        "registers": {
+            "edges": [
+                {
+                    "node": {
+                        "registerIdentifier": "SECRET-REGISTER",
+                        "registerAccumulation": {
+                            "importReadings": {
+                                "edges": [
+                                    {"node": reading("11995.610", "METERS_CUBED")}
+                                ]
+                            }
+                        },
+                    }
+                }
+            ]
+        },
+    }
+    supply_point = {"devices": {"edges": [{"node": device}]}}
+
+    report = probe.build_device_report(supply_point, "SECRET-SERIAL")
+
+    assert "| Device 1 | Yes |" in report
+    assert "| Device 1 / Register 1 | Yes |" in report
+    assert "11995.610" in report
+    assert "SECRET-SERIAL" not in report
+    assert "SECRET-REGISTER" not in report

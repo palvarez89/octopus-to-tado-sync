@@ -76,6 +76,58 @@ query GasAccumulationReadings($mprn: String!, $start: DateTime!, $end: DateTime!
   }
 }
 """
+DEVICE_ACCUMULATION_QUERY = """
+query GasDeviceAccumulationReadings(
+  $mprn: String!
+  $start: DateTime!
+  $end: DateTime!
+) {
+  supplyPoint(externalIdentifier: $mprn, marketName: "GBR_GAS") {
+    devices(first: 20) {
+      totalCount
+      edges {
+        node {
+          deviceIdentifier
+          deviceAccumulation: readings(
+            startAt: $start
+            endAt: $end
+            readingType: ACCUMULATION
+            timezone: "Europe/London"
+            units: [METERS_CUBED]
+          ) {
+            importReadings(first: 20) {
+              edges {
+                node { value units intervalStart intervalEnd }
+              }
+            }
+          }
+          registers(first: 20) {
+            totalCount
+            edges {
+              node {
+                registerIdentifier
+                registerAccumulation: readings(
+                  startAt: $start
+                  endAt: $end
+                  readingType: ACCUMULATION
+                  timezone: "Europe/London"
+                  units: [METERS_CUBED]
+                ) {
+                  importReadings(first: 20) {
+                    edges {
+                      node { value units intervalStart intervalEnd }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 class OctopusProbeError(RuntimeError):
@@ -122,6 +174,11 @@ def obtain_token(api_key: str) -> str:
 
 def extract_readings(supply_point: Dict[str, Any], alias: str) -> List[Dict[str, Any]]:
     connection = supply_point.get(alias, {}).get("importReadings", {})
+    edges = connection.get("edges") or []
+    return [edge["node"] for edge in edges if isinstance(edge.get("node"), dict)]
+
+
+def connection_nodes(connection: Dict[str, Any]) -> List[Dict[str, Any]]:
     edges = connection.get("edges") or []
     return [edge["node"] for edge in edges if isinstance(edge.get("node"), dict)]
 
@@ -194,6 +251,73 @@ def accumulation_conclusion(
             "Octopus returned interval consumption but no cumulative meter-register reading.",
         )
     return ("Inconclusive", "No gas readings were returned for the selected period.")
+
+
+def latest_value_and_time(
+    readings: Sequence[Dict[str, Any]],
+) -> Tuple[str, str]:
+    latest = latest_reading(readings)
+    if not latest:
+        return "none", "none"
+    value = str(latest.get("value", "unknown"))
+    timestamp = str(
+        latest.get("intervalEnd") or latest.get("intervalStart") or "unknown"
+    )
+    return value, timestamp
+
+
+def build_device_report(
+    supply_point: Dict[str, Any], gas_serial_number: Optional[str]
+) -> str:
+    devices = connection_nodes(supply_point.get("devices", {}))
+    lines = [
+        "",
+        "## Per-device and per-register accumulation",
+        "",
+        "Identifiers are deliberately hidden; only a match against the configured gas serial is shown.",
+        "",
+        "| Scope | Matches configured gas serial | Rows | Latest m3 | Timestamp |",
+        "|---|---|---:|---:|---|",
+    ]
+    matched_configured_meter = False
+    for device_index, device in enumerate(devices, start=1):
+        device_identifier = str(device.get("deviceIdentifier") or "")
+        is_match = bool(gas_serial_number and device_identifier == gas_serial_number)
+        matched_configured_meter = matched_configured_meter or is_match
+        device_readings = extract_readings(device, "deviceAccumulation")
+        device_value, device_timestamp = latest_value_and_time(device_readings)
+        registers = connection_nodes(device.get("registers", {}))
+        lines.append(
+            f"| Device {device_index} | {'Yes' if is_match else 'No'} | "
+            f"{len(device_readings)} | {device_value} | {device_timestamp} |"
+        )
+        for register_index, register in enumerate(registers, start=1):
+            register_readings = extract_readings(register, "registerAccumulation")
+            register_value, register_timestamp = latest_value_and_time(
+                register_readings
+            )
+            lines.append(
+                f"| Device {device_index} / Register {register_index} | "
+                f"{'Yes' if is_match else 'No'} | {len(register_readings)} | "
+                f"{register_value} | {register_timestamp} |"
+            )
+
+    if not devices:
+        lines.append("| No devices returned | No | 0 | none | none |")
+    if gas_serial_number and not matched_configured_meter:
+        lines.extend(
+            [
+                "",
+                "The configured gas serial did not match any returned device identifier.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "This section does not print device identifiers or the configured gas serial.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
 
 
 def build_report(
@@ -290,7 +414,9 @@ def build_report(
     return "\n".join(lines) + "\n"
 
 
-def run_probe(api_key: str, mprn: str, days: int) -> str:
+def run_probe(
+    api_key: str, mprn: str, days: int, gas_serial_number: Optional[str] = None
+) -> str:
     if days < 1 or days > 90:
         raise ValueError("days must be between 1 and 90")
     end = datetime.now(timezone.utc).replace(microsecond=0)
@@ -323,7 +449,7 @@ def run_probe(api_key: str, mprn: str, days: int) -> str:
     except OctopusProbeError as exc:
         accumulation_error = str(exc)
 
-    return build_report(
+    report = build_report(
         start,
         end,
         extract_readings(supply_point, "kwh"),
@@ -331,6 +457,23 @@ def run_probe(api_key: str, mprn: str, days: int) -> str:
         accumulation_readings,
         accumulation_error,
     )
+    try:
+        device_data = graphql_request(
+            DEVICE_ACCUMULATION_QUERY,
+            {"mprn": mprn, "start": start.isoformat(), "end": end.isoformat()},
+            token=token,
+        )
+        device_supply_point = device_data.get("supplyPoint")
+        if not isinstance(device_supply_point, dict):
+            raise OctopusProbeError(
+                "Octopus returned no matching gas supply point for devices"
+            )
+        report += build_device_report(device_supply_point, gas_serial_number)
+    except OctopusProbeError as exc:
+        report += (
+            "\n## Per-device and per-register accumulation\n\n" f"API error: {exc}\n"
+        )
+    return report
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -339,6 +482,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--api-key", required=True)
     parser.add_argument("--mprn", required=True)
+    parser.add_argument("--gas-serial-number", required=True)
     parser.add_argument("--days", type=int, default=7)
     return parser.parse_args(argv)
 
@@ -346,7 +490,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
-        report = run_probe(args.api_key, args.mprn, args.days)
+        report = run_probe(args.api_key, args.mprn, args.days, args.gas_serial_number)
     except (OctopusProbeError, requests.RequestException, ValueError) as exc:
         print(f"Octopus kWh check failed: {exc}", file=sys.stderr)
         return 1

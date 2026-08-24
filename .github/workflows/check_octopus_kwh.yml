@@ -37,4 +37,5 @@ jobs:
           python check_octopus_kwh.py \
             --api-key "${{ secrets.OCTOPUS_API_KEY }}" \
             --mprn "${{ secrets.OCTOPUS_MPRN }}" \
+            --gas-serial-number "${{ secrets.OCTOPUS_GAS_SERIAL }}" \
             --days "${{ inputs.days }}"
