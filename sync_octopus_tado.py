@@ -9,6 +9,23 @@ from playwright.async_api import async_playwright
 from PyTado.interface import Tado
 from requests.auth import HTTPBasicAuth
 
+DEFAULT_M3_TO_KWH_FACTOR = 11.1868
+
+
+def get_consumption_unit_multiplier(source_unit, target_unit, m3_to_kwh_factor):
+    """Return the multiplier needed to convert Octopus usage to Tado's unit."""
+    source_unit = source_unit.lower()
+    target_unit = target_unit.lower()
+    if source_unit == target_unit:
+        return 1.0
+    if source_unit == "m3" and target_unit == "kwh":
+        return m3_to_kwh_factor
+    if source_unit == "kwh" and target_unit == "m3":
+        return 1.0 / m3_to_kwh_factor
+    raise ValueError(
+        f"Unsupported consumption unit conversion: {source_unit} to {target_unit}"
+    )
+
 
 def call_tado_method(tado, *method_names, **kwargs):
     """Call the first available Tado client method from a list of candidates."""
@@ -410,6 +427,7 @@ def get_meter_reading_total_consumption(
     today=None,
     data_delay_days=2,
     include_reading_date=False,
+    consumption_multiplier=1.0,
 ):
     """
     Retrieves total gas consumption and calculates the delta since last Tado reading.
@@ -460,6 +478,13 @@ def get_meter_reading_total_consumption(
                 print("Octopus returned no complete intervals. Skipping meter update.")
                 return None
 
+            raw_consumption_delta = consumption_delta
+            consumption_delta *= consumption_multiplier
+            if consumption_multiplier != 1.0:
+                print(
+                    f"Converted consumption delta: {raw_consumption_delta} -> "
+                    f"{consumption_delta}"
+                )
             total_consumption = checkpoint_value + consumption_delta
             print(f"Consumption delta since last reading: {consumption_delta}")
             print(f"New total consumption: {total_consumption}")
@@ -505,6 +530,7 @@ def get_meter_reading_total_consumption(
         print("Octopus returned no complete intervals. Skipping meter update.")
         return None
 
+    total_consumption *= consumption_multiplier
     print(
         "Total consumption (fallback - all available Octopus data): "
         f"{total_consumption}"
@@ -579,7 +605,7 @@ def send_reading_to_tado(username, password, reading, reading_date=None):
 
     tado = tado_login(username=username, password=password)
 
-    payload = {"reading": int(reading)}
+    payload = {"reading": int(reading + 0.5)}
     if reading_date is not None:
         payload["date"] = format_api_date(reading_date)
 
@@ -594,7 +620,7 @@ def send_reading_to_tado(username, password, reading, reading_date=None):
 
 def send_reading_to_tado_client(tado, reading, reading_date=None):
     """Send the total consumption reading to an authenticated Tado client."""
-    payload = {"reading": int(reading)}
+    payload = {"reading": int(reading + 0.5)}
     if reading_date is not None:
         payload["date"] = format_api_date(reading_date)
 
@@ -642,6 +668,27 @@ def parse_args():
         action="store_true",
         help="Also sync Octopus gas tariff periods to Tado Energy IQ.",
     )
+    parser.add_argument(
+        "--octopus-consumption-unit",
+        choices=("m3", "kwh"),
+        default=os.getenv("OCTOPUS_CONSUMPTION_UNIT", "m3").lower(),
+        help="Unit returned by the Octopus gas consumption API (default: m3).",
+    )
+    parser.add_argument(
+        "--tado-reading-unit",
+        choices=("m3", "kwh"),
+        default=os.getenv("TADO_READING_UNIT", "kwh").lower(),
+        help="Meter-reading unit configured in Tado Energy IQ (default: kwh).",
+    )
+    parser.add_argument(
+        "--m3-to-kwh-factor",
+        type=float,
+        default=float(os.getenv("M3_TO_KWH_FACTOR", str(DEFAULT_M3_TO_KWH_FACTOR))),
+        help=(
+            "Conversion factor when Octopus returns m3 and Tado expects kWh "
+            f"(default: {DEFAULT_M3_TO_KWH_FACTOR})."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -652,12 +699,18 @@ def main():
     # First, authenticate with Tado to retrieve the last reading
     tado = tado_login(args.tado_email, args.tado_password)
 
+    consumption_multiplier = get_consumption_unit_multiplier(
+        args.octopus_consumption_unit,
+        args.tado_reading_unit,
+        args.m3_to_kwh_factor,
+    )
     meter_update = get_meter_reading_total_consumption(
         args.octopus_api_key,
         args.mprn,
         args.gas_serial_number,
         tado=tado,
         include_reading_date=True,
+        consumption_multiplier=consumption_multiplier,
     )
 
     if meter_update is not None:

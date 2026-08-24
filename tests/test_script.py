@@ -5,8 +5,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sync_octopus_tado import (
+    DEFAULT_M3_TO_KWH_FACTOR,
     call_tado_method,
     get_consumption_since_date,
+    get_consumption_unit_multiplier,
     get_meter_reading_total_consumption,
     get_tado_last_meter_reading,
     get_tado_last_tariff_checkpoint,
@@ -57,6 +59,40 @@ def test_get_meter_reading_with_delta_sync(mock_get):
     )
     # Should be 100 (previous) + 3.5 (delta) = 103.5
     assert total == 103.5
+
+
+def test_consumption_unit_multiplier_converts_m3_to_kwh():
+    multiplier = get_consumption_unit_multiplier("m3", "kwh", DEFAULT_M3_TO_KWH_FACTOR)
+
+    assert multiplier == DEFAULT_M3_TO_KWH_FACTOR
+    assert get_consumption_unit_multiplier("kwh", "kwh", multiplier) == 1.0
+
+
+@patch("sync_octopus_tado.requests.get")
+def test_meter_sync_converts_octopus_m3_to_tado_kwh(mock_get):
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
+        "results": [{"consumption": 1.010}],
+        "next": None,
+    }
+    mock_get.return_value = response
+
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [{"reading": 3859, "date": "2026-08-20"}]
+    }
+
+    total = get_meter_reading_total_consumption(
+        "fake-api-key",
+        "123456789",
+        "GAS123",
+        tado=mock_tado,
+        today=date(2026, 8, 24),
+        consumption_multiplier=DEFAULT_M3_TO_KWH_FACTOR,
+    )
+
+    assert total == pytest.approx(3859 + (1.010 * DEFAULT_M3_TO_KWH_FACTOR))
 
 
 @patch("sync_octopus_tado.requests.get")
@@ -151,7 +187,7 @@ def test_send_reading_to_tado_client_uses_source_cutoff_date():
     send_reading_to_tado_client(mock_tado, 3861.5, date(2026, 8, 24))
 
     mock_tado.set_eiq_meter_readings.assert_called_once_with(
-        reading=3861, date="2026-08-24"
+        reading=3862, date="2026-08-24"
     )
 
 
@@ -410,3 +446,6 @@ def test_parse_args_update_tariff_flag():
 
     assert args.update_tariff is True
     assert args.octopus_account_number == "A-12345"
+    assert args.octopus_consumption_unit == "m3"
+    assert args.tado_reading_unit == "kwh"
+    assert args.m3_to_kwh_factor == DEFAULT_M3_TO_KWH_FACTOR
