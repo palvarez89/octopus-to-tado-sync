@@ -6,6 +6,11 @@ import pytest
 import check_octopus_kwh as probe
 
 
+def test_readings_query_uses_octopus_gbr_gas_market():
+    assert 'marketName: "GBR_GAS"' in probe.READINGS_QUERY
+    assert 'marketName: "GBR"' not in probe.READINGS_QUERY
+
+
 def reading(value, units, start="2026-08-20T00:00:00+01:00"):
     return {
         "value": value,
