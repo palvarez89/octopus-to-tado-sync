@@ -169,6 +169,38 @@ query GasRegisterReadings(
 """
 
 
+ACCOUNT_GAS_METER_QUERY = """
+query FindGasMeter($accountNumber: String!) {
+  account(accountNumber: $accountNumber) {
+    properties {
+      gasMeterPoints {
+        mprn
+        meters { id serialNumber }
+      }
+    }
+  }
+}
+"""
+ACTUAL_GAS_METER_READINGS_QUERY = """
+query ActualGasMeterReadings($accountNumber: String!, $meterId: String!) {
+  gasMeterReadings(
+    accountNumber: $accountNumber
+    meterId: $meterId
+    last: 20
+  ) {
+    totalCount
+    edges {
+      node {
+        readAt
+        readingType
+        registers { identifier name value digits isQuarantined }
+      }
+    }
+  }
+}
+"""
+
+
 class OctopusProbeError(RuntimeError):
     """Raised when the diagnostic API request cannot be completed."""
 
@@ -398,6 +430,69 @@ def build_device_report(
     return "\n".join(lines) + "\n"
 
 
+def find_matching_gas_meter_ids(
+    account: Dict[str, Any], mprn: str, gas_serial_number: str
+) -> List[str]:
+    meter_ids = []
+    for property_info in account.get("properties") or []:
+        for meter_point in property_info.get("gasMeterPoints") or []:
+            if str(meter_point.get("mprn") or "") != mprn:
+                continue
+            for meter in meter_point.get("meters") or []:
+                if str(meter.get("serialNumber") or "") != gas_serial_number:
+                    continue
+                meter_id = str(meter.get("id") or "")
+                if meter_id:
+                    meter_ids.append(meter_id)
+    return meter_ids
+
+
+def redact_message(message: str, identifiers: Sequence[Optional[str]]) -> str:
+    for identifier in identifiers:
+        if identifier:
+            message = message.replace(identifier, "[redacted]")
+    return message
+
+
+def build_actual_meter_readings_report(
+    meter_results: Sequence[Sequence[Dict[str, Any]]],
+    error: Optional[str] = None,
+) -> str:
+    lines = [
+        "",
+        "## Dedicated Octopus gas meter readings",
+        "",
+        "This uses Octopus's gasMeterReadings query for actual meter-reading records.",
+        "",
+        "| Scope | Read at | Reading type | Value | Digits | Quarantined |",
+        "|---|---|---|---:|---:|---|",
+    ]
+    row_count = 0
+    for meter_index, readings in enumerate(meter_results, start=1):
+        ordered = sorted(
+            readings, key=lambda reading: str(reading.get("readAt") or ""), reverse=True
+        )
+        for reading_index, reading in enumerate(ordered, start=1):
+            registers = reading.get("registers") or []
+            for register_index, register in enumerate(registers, start=1):
+                row_count += 1
+                lines.append(
+                    f"| Meter {meter_index} / Reading {reading_index} / "
+                    f"Register {register_index} | "
+                    f"{reading.get('readAt') or 'unknown'} | "
+                    f"{reading.get('readingType') or 'unknown'} | "
+                    f"{register.get('value') or 'unknown'} | "
+                    f"{register.get('digits') if register.get('digits') is not None else 'unknown'} | "
+                    f"{register.get('isQuarantined') if register.get('isQuarantined') is not None else 'unknown'} |"
+                )
+    if error:
+        lines.append(f"| API query | none | none | API error: {error} | none | none |")
+    elif not row_count:
+        lines.append("| No readings returned | none | none | none | none | none |")
+    lines.extend(["", "Meter and register identifiers are deliberately hidden."])
+    return "\n".join(lines) + "\n"
+
+
 def build_report(
     start: datetime,
     end: datetime,
@@ -493,7 +588,11 @@ def build_report(
 
 
 def run_probe(
-    api_key: str, mprn: str, days: int, gas_serial_number: Optional[str] = None
+    api_key: str,
+    mprn: str,
+    days: int,
+    gas_serial_number: Optional[str] = None,
+    account_number: Optional[str] = None,
 ) -> str:
     if days < 1 or days > 90:
         raise ValueError("days must be between 1 and 90")
@@ -627,6 +726,56 @@ def run_probe(
         device_error,
         register_list_error,
     )
+    actual_meter_results: List[List[Dict[str, Any]]] = []
+    actual_meter_errors: List[str] = []
+    if account_number and gas_serial_number:
+        try:
+            account_data = graphql_request(
+                ACCOUNT_GAS_METER_QUERY,
+                {"accountNumber": account_number},
+                token=token,
+            )
+            account = account_data.get("account")
+            if not isinstance(account, dict):
+                raise OctopusProbeError("Octopus returned no matching account")
+            meter_ids = find_matching_gas_meter_ids(account, mprn, gas_serial_number)
+            if not meter_ids:
+                raise OctopusProbeError(
+                    "No gas meter matched the configured MPRN and serial"
+                )
+            for meter_id in meter_ids:
+                try:
+                    reading_data = graphql_request(
+                        ACTUAL_GAS_METER_READINGS_QUERY,
+                        {"accountNumber": account_number, "meterId": meter_id},
+                        token=token,
+                    )
+                    connection = reading_data.get("gasMeterReadings")
+                    if not isinstance(connection, dict):
+                        raise OctopusProbeError(
+                            "Octopus returned no gas meter reading connection"
+                        )
+                    actual_meter_results.append(connection_nodes(connection))
+                except OctopusProbeError as exc:
+                    actual_meter_errors.append(
+                        redact_message(
+                            str(exc),
+                            (account_number, mprn, gas_serial_number, meter_id),
+                        )
+                    )
+        except OctopusProbeError as exc:
+            actual_meter_errors.append(
+                redact_message(str(exc), (account_number, mprn, gas_serial_number))
+            )
+    else:
+        actual_meter_errors.append(
+            "No Octopus account number or configured gas serial was provided"
+        )
+
+    report += build_actual_meter_readings_report(
+        actual_meter_results,
+        "; ".join(actual_meter_errors) if actual_meter_errors else None,
+    )
     return report
 
 
@@ -637,6 +786,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--api-key", required=True)
     parser.add_argument("--mprn", required=True)
     parser.add_argument("--gas-serial-number", required=True)
+    parser.add_argument("--account-number", required=True)
     parser.add_argument("--days", type=int, default=7)
     return parser.parse_args(argv)
 
@@ -644,7 +794,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
-        report = run_probe(args.api_key, args.mprn, args.days, args.gas_serial_number)
+        report = run_probe(
+            args.api_key,
+            args.mprn,
+            args.days,
+            args.gas_serial_number,
+            args.account_number,
+        )
     except (OctopusProbeError, requests.RequestException, ValueError) as exc:
         print(f"Octopus kWh check failed: {exc}", file=sys.stderr)
         return 1
