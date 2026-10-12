@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # Runs every Wednesday at 12pm UTC
-    - cron: '0 12 * * 3'
+    - cron: '30 1 * * *'
 
 jobs:
   run_script:
@@ -34,4 +34,6 @@ jobs:
           --tado-password "${{ secrets.TADO_PASSWORD }}" \
           --mprn "${{ secrets.OCTOPUS_MPRN }}" \
           --gas-serial-number "${{ secrets.OCTOPUS_GAS_SERIAL }}" \
-          --octopus-api-key "${{ secrets.OCTOPUS_API_KEY }}"
+          --octopus-api-key "${{ secrets.OCTOPUS_API_KEY }}" \
+          --octopus-account-number "${{ secrets.OCTOPUS_ACCOUNT_NUMBER }}" \
+          --update-tariff

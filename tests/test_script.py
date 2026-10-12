@@ -6,12 +6,13 @@ import pytest
 
 from sync_octopus_tado import (
     call_tado_method,
-    get_tado_last_tariff_checkpoint,
     get_consumption_since_date,
     get_meter_reading_total_consumption,
     get_tado_last_meter_reading,
+    get_tado_last_tariff_checkpoint,
     parse_args,
     send_reading_to_tado,
+    send_reading_to_tado_client,
     sync_octopus_tariffs_to_tado,
     tado_login,
 )
@@ -56,6 +57,102 @@ def test_get_meter_reading_with_delta_sync(mock_get):
     )
     # Should be 100 (previous) + 3.5 (delta) = 103.5
     assert total == 103.5
+
+
+@patch("sync_octopus_tado.requests.get")
+def test_meter_sync_waits_for_complete_period(mock_get):
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [
+            {"reading": 3859, "date": "2026-08-23"},
+            {"reading": 3859, "date": "2026-08-22"},
+        ]
+    }
+
+    update = get_meter_reading_total_consumption(
+        "fake-api-key",
+        "123456789",
+        "GAS123",
+        tado=mock_tado,
+        today=date(2026, 8, 24),
+        include_reading_date=True,
+    )
+
+    assert update is None
+    mock_get.assert_not_called()
+
+
+@patch("sync_octopus_tado.requests.get")
+def test_meter_sync_does_not_advance_checkpoint_when_octopus_has_no_data(mock_get):
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {"results": [], "next": None}
+    mock_get.return_value = response
+
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [{"reading": 3859, "date": "2026-08-20"}]
+    }
+
+    update = get_meter_reading_total_consumption(
+        "fake-api-key",
+        "123456789",
+        "GAS123",
+        tado=mock_tado,
+        today=date(2026, 8, 24),
+        include_reading_date=True,
+    )
+
+    assert update is None
+
+
+@patch("sync_octopus_tado.requests.get")
+def test_meter_sync_recovers_flat_streak_from_last_changed_reading(mock_get):
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
+        "results": [{"consumption": 1.5}, {"consumption": 2.0}],
+        "next": None,
+    }
+    mock_get.return_value = response
+
+    mock_tado = MagicMock()
+    mock_tado.get_eiq_meter_readings.return_value = {
+        "readings": [
+            {"reading": 3859, "date": "2026-08-23"},
+            {"reading": 3859, "date": "2026-08-22"},
+            {"reading": 3859, "date": "2026-08-21"},
+            {"reading": 3859, "date": "2026-08-20"},
+            {"reading": 3859, "date": "2026-08-19"},
+            {"reading": 3858, "date": "2026-08-18"},
+        ]
+    }
+
+    update = get_meter_reading_total_consumption(
+        "fake-api-key",
+        "123456789",
+        "GAS123",
+        tado=mock_tado,
+        today=date(2026, 8, 26),
+        include_reading_date=True,
+    )
+
+    assert update == (3861.5, date(2026, 8, 24))
+    requested_url = mock_get.call_args.args[0]
+    assert "period_from=2026-08-18" in requested_url
+    assert "period_to=2026-08-24" in requested_url
+    assert "group_by=quarter" not in requested_url
+
+
+def test_send_reading_to_tado_client_uses_source_cutoff_date():
+    mock_tado = MagicMock()
+    mock_tado.set_eiq_meter_readings.return_value = {"status": "success"}
+
+    send_reading_to_tado_client(mock_tado, 3861.5, date(2026, 8, 24))
+
+    mock_tado.set_eiq_meter_readings.assert_called_once_with(
+        reading=3861, date="2026-08-24"
+    )
 
 
 @patch("sync_octopus_tado.browser_login")
