@@ -1,0 +1,36 @@
+name: Create monthly activity commit
+
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-empty-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Create an empty commit after 30 days of inactivity
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          last_commit_timestamp="$(git log -1 --format=%ct)"
+          thirty_days_ago="$(date --utc --date='30 days ago' +%s)"
+
+          if [ "$last_commit_timestamp" -ge "$thirty_days_ago" ]; then
+            echo "The latest commit is less than 30 days old; no commit needed."
+            exit 0
+          fi
+
+          git commit --allow-empty -m "chore: monthly activity heartbeat"
+          git push
