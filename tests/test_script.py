@@ -6,10 +6,10 @@ import pytest
 
 from sync_octopus_tado import (
     call_tado_method,
-    get_tado_last_tariff_checkpoint,
     get_consumption_since_date,
     get_meter_reading_total_consumption,
     get_tado_last_meter_reading,
+    get_tado_last_tariff_checkpoint,
     parse_args,
     send_reading_to_tado,
     sync_octopus_tariffs_to_tado,

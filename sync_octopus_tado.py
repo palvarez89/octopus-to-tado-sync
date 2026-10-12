@@ -243,9 +243,9 @@ def discover_octopus_tariff_periods(
         if not tariff_code:
             continue
 
-        product_code = agreement.get("product_code") or derive_product_code_from_tariff_code(
-            tariff_code
-        )
+        product_code = agreement.get(
+            "product_code"
+        ) or derive_product_code_from_tariff_code(tariff_code)
         unit_rates = get_octopus_standard_unit_rates(api_key, product_code, tariff_code)
         agreement_periods = build_octopus_tariff_periods(agreement, unit_rates)
 
